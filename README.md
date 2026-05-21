@@ -1,6 +1,7 @@
 # Catalogo Cliente
 
-Site estatico para clientes montarem pedidos pelo catalogo e enviarem pelo WhatsApp.
+Aplicativo web para clientes montarem pedidos pelo catalogo e enviarem pelo WhatsApp.
+No Render ele roda com servidor Node e Postgres, guardando pedidos, usuarios e historico de downloads.
 
 ## Configuracao
 
@@ -16,23 +17,48 @@ window.STORE_CONFIG = {
 
 Use o WhatsApp com DDI e DDD, somente numeros.
 
-## Publicar no Render
+## Publicar no Render com banco
 
 1. Suba este projeto para um repositorio no GitHub.
-2. No Render, clique em `New > Static Site`.
+2. No Render, use `New > Blueprint`.
 3. Conecte o repositorio.
-4. Use:
-   - Build command: vazio
-   - Publish directory: `.`
+4. O arquivo `render.yaml` cria:
+   - Web Service Node `catalogo-cliente`
+   - Postgres `catalogo-cliente-db`
+   - Variavel `DATABASE_URL` ligada ao banco
+   - `SESSION_SECRET` gerado automaticamente
+5. Informe no painel do Render:
+   - `ADMIN_PASSWORD`
+   - `SELLER_PASSWORD`
 
-O arquivo `render.yaml` tambem esta pronto para Blueprint.
+Para teste local, o servidor usa um arquivo em `data/local-db.json`.
 
 ## Cliente
 
-Envie para o cliente a URL principal do site.
+Envie para o cliente a URL principal do aplicativo no Render.
 
-O cliente escolhe produtos, preenche os dados e envia pelo WhatsApp. A mensagem vai com o numero do pedido, itens e total.
+O cliente escolhe produtos, preenche os dados e envia pelo WhatsApp. A mensagem vai com numero do pedido, itens, total e link interno para a vendedora abrir direto o pedido.
 
-## Modo dono
+## Modo vendedora/admin
 
-Acesse com `?dono=1` no final da URL para mostrar recursos internos, como historico local e baixar Excel do orcamento.
+Acesse com `?dono=1` no final da URL.
+
+No modo vendedora:
+
+- Nao aparece catalogo.
+- Nao aparece carrinho.
+- Aparece login e senha.
+- Depois do login, aparecem os pedidos realizados.
+- Se acessar pelo link do WhatsApp, cai direto no pedido.
+- Ao baixar Excel, o sistema registra quem baixou e quando.
+
+O admin tambem pode criar usuarios e ver o historico de cada pedido.
+
+## Logins iniciais
+
+Localmente, se nenhuma senha estiver configurada:
+
+- Admin: `admin` / `admin123`
+- Vendedora: `vendedora` / `vendedora123`
+
+No Render, configure senhas reais nas variaveis `ADMIN_PASSWORD` e `SELLER_PASSWORD`.

@@ -293,6 +293,99 @@ body.owner-mode .topbar {
   padding: 16px;
 }
 
+.seller-login label,
+.seller-user-form {
+  display: grid;
+  gap: 6px;
+}
+
+.seller-login input,
+.seller-user-form input,
+.seller-user-form select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: white;
+  padding: 10px 11px;
+  font-weight: 700;
+}
+
+.seller-login h3 {
+  margin: 2px 0 4px;
+  color: var(--accent-dark);
+  font-size: 24px;
+}
+
+.seller-login p {
+  margin: 0;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.seller-error {
+  border: 1px solid #e0a2a2;
+  border-radius: var(--radius);
+  background: #fff0f0;
+  color: #8d2626;
+  padding: 10px;
+  font-weight: 800;
+}
+
+.seller-admin-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fffdfa;
+}
+
+.seller-admin-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.seller-user-form {
+  grid-template-columns: 1fr;
+}
+
+.seller-user-list {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.seller-events {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.seller-events h4 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.seller-events div {
+  display: grid;
+  gap: 2px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fffdfa;
+}
+
+.seller-events span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .brand {
   display: flex;
   align-items: center;

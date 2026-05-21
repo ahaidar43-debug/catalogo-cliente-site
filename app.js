@@ -10,6 +10,7 @@ const KEYS = {
   config: "catalogo.config.v1",
   checkout: "catalogo.checkout.v1",
   orders: "catalogo.orders.v1",
+  auth: "catalogo.auth.v1",
 };
 
 const money = new Intl.NumberFormat("pt-BR", {
@@ -24,6 +25,10 @@ const state = {
   visible: 72,
   currentOrderCode: "",
   activeSellerOrderCode: "",
+  pendingSellerLink: null,
+  sellerEvents: [],
+  sellerUsers: [],
+  auth: readJson(KEYS.auth, null),
   cart: readJson(KEYS.cart, {}),
   checkout: readJson(KEYS.checkout, {
     name: "",
@@ -89,7 +94,7 @@ const categoryCounts = activeProducts.reduce((map, product) => {
 
 init();
 
-function init() {
+async function init() {
   document.body.classList.toggle("owner-mode", ownerMode);
   refs.mainLayout.hidden = ownerMode;
   refs.sellerDashboard.hidden = !ownerMode;
@@ -100,9 +105,9 @@ function init() {
   renderStore();
   bindEvents();
   if (ownerMode) {
-    const openedOrderCode = importSharedOrderFromUrl();
-    renderSellerDashboard(openedOrderCode);
-    if (openedOrderCode) showToast("Pedido aberto na tela da vendedora");
+    state.pendingSellerLink = getSellerLinkParams();
+    await renderSellerDashboard(state.pendingSellerLink?.code || importSharedOrderFromUrl());
+    if (state.pendingSellerLink?.code) showToast("Entre para abrir o pedido recebido");
     return;
   }
   renderBrandOptions();
@@ -121,6 +126,40 @@ function readJson(key, fallback) {
 
 function writeJson(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
+}
+
+async function apiRequest(path, options = {}) {
+  const headers = {
+    ...(options.body ? { "Content-Type": "application/json" } : {}),
+    ...(options.headers || {}),
+  };
+  if (state.auth?.token) headers.Authorization = `Bearer ${state.auth.token}`;
+
+  const response = await fetch(path, {
+    ...options,
+    headers,
+  });
+
+  if (!response.ok) {
+    let message = "Nao foi possivel conectar com a base";
+    try {
+      message = (await response.json()).error || message;
+    } catch {}
+    throw new Error(message);
+  }
+
+  if (options.raw) return response;
+  return response.json();
+}
+
+function saveAuth(auth) {
+  state.auth = auth;
+  writeJson(KEYS.auth, auth);
+}
+
+function clearAuth() {
+  state.auth = null;
+  localStorage.removeItem(KEYS.auth);
 }
 
 function normalize(value) {
@@ -273,6 +312,7 @@ function bindEvents() {
   });
 
   refs.sellerDashboard.addEventListener("click", handleSellerDashboardClick);
+  refs.sellerDashboard.addEventListener("submit", handleSellerDashboardSubmit);
 }
 
 function getFilteredProducts() {
@@ -438,12 +478,12 @@ function handleCartClick(event) {
   }
 
   if (button.dataset.copyOrder) {
-    copyOrder();
+    copyOrder().catch((error) => showToast(error.message));
     return;
   }
 
   if (button.dataset.whatsappOrder) {
-    sendWhatsApp();
+    sendWhatsApp().catch((error) => showToast(error.message));
     return;
   }
 
@@ -807,15 +847,47 @@ function importSharedOrderFromUrl() {
   return order.code;
 }
 
+function getSellerLinkParams() {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get("pedido");
+  const token = params.get("token");
+  return code ? { code, token: token || "" } : null;
+}
+
+async function prepareOrderForSending() {
+  const order = buildOrderText();
+  try {
+    const saved = await apiRequest("/api/orders", {
+      method: "POST",
+      body: JSON.stringify(order),
+    });
+    const sellerUrl = saved.sellerUrl || saved.order?.sellerUrl;
+    if (sellerUrl) {
+      return {
+        ...order,
+        sellerUrl,
+        text: [
+          order.text,
+          "",
+          "LINK PARA VENDEDORA VISUALIZAR E BAIXAR EXCEL:",
+          sellerUrl,
+        ].join("\n"),
+      };
+    }
+  } catch {
+  }
+  return addSellerLink(order);
+}
+
 async function copyOrder() {
-  const order = addSellerLink(buildOrderText());
+  const order = await prepareOrderForSending();
   await navigator.clipboard.writeText(order.text);
   saveOrder(order);
   showToast("Pedido copiado");
 }
 
-function sendWhatsApp() {
-  const order = addSellerLink(buildOrderText());
+async function sendWhatsApp() {
+  const order = await prepareOrderForSending();
   saveOrder(order);
   const phone = String(state.config.whatsapp || "").replace(/\D/g, "");
   const encodedText = encodeURIComponent(order.text);
@@ -871,27 +943,28 @@ function renderHistory() {
     : '<div class="empty-cart">Nenhum pedido salvo neste navegador</div>';
 }
 
-function handleSellerDashboardClick(event) {
+async function handleSellerDashboardClick(event) {
   const button = event.target.closest("button");
   if (!button) return;
 
-  const orders = readJson(KEYS.orders, []);
-
-  if (button.dataset.viewSellerOrder) {
-    renderSellerDashboard(button.dataset.viewSellerOrder);
+  if (button.dataset.logout) {
+    clearAuth();
+    await renderSellerDashboard();
     return;
   }
 
-  const code = button.dataset.downloadSellerOrder || button.dataset.copySellerOrder;
-  const order = orders.find((item) => item.code === code);
-  if (!order) return;
+  if (button.dataset.viewSellerOrder) {
+    await renderSellerDashboard(button.dataset.viewSellerOrder);
+    return;
+  }
 
   if (button.dataset.downloadSellerOrder) {
-    downloadQuote(order);
+    await downloadSellerOrder(button.dataset.downloadSellerOrder);
     return;
   }
 
   if (button.dataset.copySellerOrder) {
+    const order = await fetchSellerOrder(button.dataset.copySellerOrder);
     if (!navigator.clipboard) {
       showToast("Copia nao disponivel neste navegador");
       return;
@@ -903,15 +976,72 @@ function handleSellerDashboardClick(event) {
   }
 }
 
-function renderSellerDashboard(preferredCode = "") {
-  const orders = readJson(KEYS.orders, []);
-  const selectedCode = preferredCode || state.activeSellerOrderCode || orders[0]?.code || "";
-  const selectedOrder = orders.find((order) => order.code === selectedCode) || orders[0] || null;
-  state.activeSellerOrderCode = selectedOrder?.code || "";
+async function handleSellerDashboardSubmit(event) {
+  event.preventDefault();
+  const form = event.target;
+
+  if (form.matches("[data-login-form]")) {
+    const formData = new FormData(form);
+    const auth = await apiRequest("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({
+        username: formData.get("username"),
+        password: formData.get("password"),
+      }),
+    });
+    saveAuth(auth);
+    await renderSellerDashboard(state.pendingSellerLink?.code || "");
+    showToast("Login realizado");
+    return;
+  }
+
+  if (form.matches("[data-create-user-form]")) {
+    const formData = new FormData(form);
+    await apiRequest("/api/users", {
+      method: "POST",
+      body: JSON.stringify({
+        name: formData.get("name"),
+        username: formData.get("username"),
+        password: formData.get("password"),
+        role: formData.get("role"),
+      }),
+    });
+    form.reset();
+    await renderSellerDashboard(state.activeSellerOrderCode);
+    showToast("Usuario criado");
+  }
+}
+
+async function renderSellerDashboard(preferredCode = "") {
+  if (!state.auth?.token) {
+    renderSellerLogin(preferredCode);
+    return;
+  }
+
+  let orders = [];
+  let selectedOrder = null;
+
+  try {
+    const response = await apiRequest("/api/orders");
+    orders = response.orders || [];
+    const selectedCode = preferredCode || state.activeSellerOrderCode || orders[0]?.code || "";
+    selectedOrder = selectedCode ? await fetchSellerOrder(selectedCode) : null;
+    state.activeSellerOrderCode = selectedOrder?.code || "";
+
+    if (state.auth.user?.role === "admin") {
+      const usersResponse = await apiRequest("/api/users");
+      state.sellerUsers = usersResponse.users || [];
+    }
+  } catch (error) {
+    clearAuth();
+    renderSellerLogin(preferredCode, error.message);
+    return;
+  }
 
   refs.sellerOrders.innerHTML = orders.length
-    ? orders.map((order) => renderSellerOrderCard(order, state.activeSellerOrderCode)).join("")
+    ? `${renderAdminPanel()}${orders.map((order) => renderSellerOrderCard(order, state.activeSellerOrderCode)).join("")}`
     : `
+        ${renderAdminPanel()}
         <div class="seller-empty">
           <strong>Nenhum pedido realizado aberto ainda</strong>
           <span>Quando chegar um WhatsApp do cliente, clique no link da vendedora dentro da mensagem.</span>
@@ -928,6 +1058,52 @@ function renderSellerDashboard(preferredCode = "") {
       `;
 }
 
+function renderSellerLogin(preferredCode = "", errorMessage = "") {
+  refs.sellerOrders.innerHTML = "";
+  refs.sellerDetail.innerHTML = `
+    <form class="seller-detail-card seller-login" data-login-form>
+      <div>
+        <span>Modo vendedora</span>
+        <h3>Entrar para ver pedidos</h3>
+        <p>${preferredCode ? `Acesse para abrir direto o pedido ${escapeHtml(preferredCode)}.` : "Entre para visualizar pedidos realizados e baixar Excel."}</p>
+      </div>
+      ${errorMessage ? `<div class="seller-error">${escapeHtml(errorMessage)}</div>` : ""}
+      <label>Login
+        <input name="username" type="text" autocomplete="username" required />
+      </label>
+      <label>Senha
+        <input name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <button class="primary-button" type="submit">Entrar</button>
+    </form>
+  `;
+}
+
+function renderAdminPanel() {
+  if (state.auth?.user?.role !== "admin") return "";
+  return `
+    <section class="seller-admin-panel">
+      <div class="seller-admin-top">
+        <strong>Administrador</strong>
+        <button class="text-button" type="button" data-logout="true">Sair</button>
+      </div>
+      <form class="seller-user-form" data-create-user-form>
+        <input name="name" type="text" placeholder="Nome" required />
+        <input name="username" type="text" placeholder="Login" required />
+        <input name="password" type="password" placeholder="Senha" minlength="6" required />
+        <select name="role">
+          <option value="seller">Vendedora</option>
+          <option value="admin">Administrador</option>
+        </select>
+        <button class="primary-button" type="submit">Criar usuario</button>
+      </form>
+      <div class="seller-user-list">
+        ${state.sellerUsers.map((user) => `<span>${escapeHtml(user.name)} - ${escapeHtml(user.role)}</span>`).join("")}
+      </div>
+    </section>
+  `;
+}
+
 function renderSellerOrderCard(order, selectedCode) {
   const active = order.code === selectedCode ? " is-active" : "";
   return `
@@ -935,7 +1111,7 @@ function renderSellerOrderCard(order, selectedCode) {
       <button type="button" data-view-seller-order="${escapeHtml(order.code)}">
         <strong>${escapeHtml(order.code)}</strong>
         <span>${escapeHtml(orderCustomerName(order))}</span>
-        <small>${escapeHtml(formatOrderDate(order.date))} - ${money.format(Number(order.total || 0))}</small>
+        <small>${escapeHtml(formatOrderDate(order.createdAt || order.date))} - ${money.format(Number(order.total || 0))}</small>
       </button>
       <div>
         <button class="primary-outline" type="button" data-download-seller-order="${escapeHtml(order.code)}">Excel</button>
@@ -953,7 +1129,7 @@ function renderSellerOrderDetail(order) {
         <div>
           <span>Pedido</span>
           <h3>${escapeHtml(order.code)}</h3>
-          <small>${escapeHtml(formatOrderDate(order.date))}</small>
+          <small>${escapeHtml(formatOrderDate(order.createdAt || order.date))}</small>
         </div>
         <strong>${money.format(Number(order.total || 0))}</strong>
       </div>
@@ -986,6 +1162,8 @@ function renderSellerOrderDetail(order) {
         <div><span>Entrega</span><strong>${money.format(Number(order.deliveryFee || 0))}</strong></div>
         <div><span>Total</span><strong>${money.format(Number(order.total || 0))}</strong></div>
       </div>
+
+      ${state.auth?.user?.role === "admin" ? renderSellerEvents() : ""}
     </article>
   `;
 }
@@ -1005,6 +1183,61 @@ function renderSellerItem(item) {
 
 function orderCustomerName(order) {
   return order.checkout?.name || order.customer || "Cliente";
+}
+
+async function fetchSellerOrder(code) {
+  const token = state.pendingSellerLink?.code === code ? state.pendingSellerLink.token : "";
+  const suffix = token ? `?token=${encodeURIComponent(token)}` : "";
+  const response = await apiRequest(`/api/orders/${encodeURIComponent(code)}${suffix}`);
+  state.sellerEvents = response.events || [];
+  return response.order;
+}
+
+async function downloadSellerOrder(code) {
+  const response = await apiRequest(`/api/orders/${encodeURIComponent(code)}/download`, { raw: true });
+  const blob = await response.blob();
+  const disposition = response.headers.get("content-disposition") || "";
+  const fileName = disposition.match(/filename="([^"]+)"/)?.[1] || `${safeFileName(code)}.xls`;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  if (state.activeSellerOrderCode === code) {
+    await fetchSellerOrder(code);
+    await renderSellerDashboard(code);
+  }
+  showToast("Download registrado");
+}
+
+function renderSellerEvents() {
+  return `
+    <div class="seller-events">
+      <h4>Historico do pedido</h4>
+      ${
+        state.sellerEvents.length
+          ? state.sellerEvents.map((event) => `
+              <div>
+                <strong>${escapeHtml(eventLabel(event.type))}</strong>
+                <span>${escapeHtml(event.user?.name || "Sistema")} - ${escapeHtml(formatOrderDate(event.createdAt))}</span>
+              </div>
+            `).join("")
+          : "<span>Nenhum historico ainda</span>"
+      }
+    </div>
+  `;
+}
+
+function eventLabel(type) {
+  const labels = {
+    created: "Pedido criado",
+    viewed: "Pedido visualizado",
+    downloaded: "Excel baixado",
+  };
+  return labels[type] || type;
 }
 
 function formatOrderDate(value) {
