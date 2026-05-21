@@ -17,17 +17,17 @@
           <span class="brand-mark" aria-hidden="true">CP</span>
           <div>
             <h1 id="storeName">Catalogo de Pecas</h1>
-            <p>Pedido online</p>
+            <p id="storeSubtitle">Pedido online</p>
           </div>
         </div>
 
         <div class="top-actions">
-          <button class="icon-button" id="historyButton" type="button" aria-label="Pedidos salvos" title="Pedidos salvos">
+          <button class="icon-button" id="historyButton" type="button" aria-label="Pedidos salvos" title="Pedidos salvos" hidden>
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M7 3h10v4h3v14H4V7h3V3Zm2 4h6V5H9v2Zm-3 2v10h12V9H6Zm3 3h6v2H9v-2Z" />
             </svg>
           </button>
-          <button class="icon-button" id="configButton" type="button" aria-label="Configuracoes" title="Configuracoes">
+          <button class="icon-button" id="configButton" type="button" aria-label="Configuracoes" title="Configuracoes" hidden>
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M19.4 13.5c.1-.5.1-1 .1-1.5s0-1-.1-1.5l2-1.5-2-3.5-2.4 1a8.2 8.2 0 0 0-2.6-1.5L14 2h-4l-.4 2.5A8.2 8.2 0 0 0 7 6L4.6 5 2.6 8.5l2 1.5c-.1.5-.1 1-.1 1.5s0 1 .1 1.5l-2 1.5 2 3.5 2.4-1a8.2 8.2 0 0 0 2.6 1.5L10 22h4l.4-2.5A8.2 8.2 0 0 0 17 18l2.4 1 2-3.5-2-1.5ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z" />
             </svg>
@@ -41,6 +41,11 @@
           </button>
         </div>
       </header>
+
+      <section class="owner-notice" id="ownerNotice" hidden>
+        <strong>Modo vendedora</strong>
+        <span>Historico local, configuracoes e Excel do orcamento ficam liberados nesta pagina.</span>
+      </section>
 
       <main class="main-layout">
         <section class="catalog-panel" aria-label="Catalogo">

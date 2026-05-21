@@ -69,6 +69,32 @@ svg {
   backdrop-filter: blur(14px);
 }
 
+body.owner-mode .topbar {
+  border-bottom-color: #d7c8a8;
+}
+
+.owner-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 24px;
+  border-bottom: 1px solid #d7c8a8;
+  background: #fff3d5;
+  color: #5c3d00;
+  font-weight: 800;
+}
+
+.owner-notice span {
+  color: #6b5a3b;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.owner-notice[hidden] {
+  display: none;
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -884,6 +910,12 @@ select:focus,
     position: absolute;
     top: 12px;
     right: 12px;
+  }
+
+  .owner-notice {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 10px 12px;
   }
 
   .brand-mark {

@@ -44,6 +44,8 @@ const ownerMode = new URLSearchParams(window.location.search).has("dono")
 
 const refs = {
   storeName: document.querySelector("#storeName"),
+  storeSubtitle: document.querySelector("#storeSubtitle"),
+  ownerNotice: document.querySelector("#ownerNotice"),
   searchInput: document.querySelector("#searchInput"),
   brandSelect: document.querySelector("#brandSelect"),
   categoryStrip: document.querySelector("#categoryStrip"),
@@ -83,7 +85,10 @@ const categoryCounts = activeProducts.reduce((map, product) => {
 init();
 
 function init() {
+  document.body.classList.toggle("owner-mode", ownerMode);
   refs.historyButton.hidden = !ownerMode;
+  refs.configButton.hidden = !ownerMode;
+  refs.ownerNotice.hidden = !ownerMode;
   renderStore();
   renderBrandOptions();
   renderCategoryChips();
@@ -114,6 +119,7 @@ function normalize(value) {
 
 function renderStore() {
   refs.storeName.textContent = state.config.name || DATA.store.name || "Catalogo de Pecas";
+  refs.storeSubtitle.textContent = ownerMode ? "Modo vendedora" : "Pedido online";
   refs.configStoreName.value = state.config.name || "";
   refs.configWhatsapp.value = state.config.whatsapp || "";
   refs.configDeliveryFee.value = Number(state.config.deliveryFee || 0).toFixed(2);
