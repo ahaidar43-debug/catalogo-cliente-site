@@ -23,6 +23,7 @@ const state = {
   brand: "",
   visible: 72,
   currentOrderCode: "",
+  activeSellerOrderCode: "",
   cart: readJson(KEYS.cart, {}),
   checkout: readJson(KEYS.checkout, {
     name: "",
@@ -46,6 +47,10 @@ const refs = {
   storeName: document.querySelector("#storeName"),
   storeSubtitle: document.querySelector("#storeSubtitle"),
   ownerNotice: document.querySelector("#ownerNotice"),
+  sellerDashboard: document.querySelector("#sellerDashboard"),
+  sellerOrders: document.querySelector("#sellerOrders"),
+  sellerDetail: document.querySelector("#sellerDetail"),
+  mainLayout: document.querySelector("#mainLayout"),
   searchInput: document.querySelector("#searchInput"),
   brandSelect: document.querySelector("#brandSelect"),
   categoryStrip: document.querySelector("#categoryStrip"),
@@ -86,13 +91,22 @@ init();
 
 function init() {
   document.body.classList.toggle("owner-mode", ownerMode);
-  refs.historyButton.hidden = !ownerMode;
-  refs.configButton.hidden = !ownerMode;
+  refs.mainLayout.hidden = ownerMode;
+  refs.sellerDashboard.hidden = !ownerMode;
+  refs.openCartButton.hidden = ownerMode;
+  refs.historyButton.hidden = true;
+  refs.configButton.hidden = true;
   refs.ownerNotice.hidden = !ownerMode;
   renderStore();
+  bindEvents();
+  if (ownerMode) {
+    const openedOrderCode = importSharedOrderFromUrl();
+    renderSellerDashboard(openedOrderCode);
+    if (openedOrderCode) showToast("Pedido aberto na tela da vendedora");
+    return;
+  }
   renderBrandOptions();
   renderCategoryChips();
-  bindEvents();
   renderProducts();
   renderCart();
 }
@@ -257,6 +271,8 @@ function bindEvents() {
     const order = orders.find((item) => item.code === button.dataset.downloadHistory);
     if (order) downloadQuote(order);
   });
+
+  refs.sellerDashboard.addEventListener("click", handleSellerDashboardClick);
 }
 
 function getFilteredProducts() {
@@ -721,15 +737,85 @@ function buildOrderText() {
   };
 }
 
+function addSellerLink(order) {
+  const sellerUrl = makeSellerOrderUrl(order);
+  return {
+    ...order,
+    sellerUrl,
+    text: [
+      order.text,
+      "",
+      "LINK PARA VENDEDORA VISUALIZAR E BAIXAR EXCEL:",
+      sellerUrl,
+    ].join("\n"),
+  };
+}
+
+function makeSellerOrderUrl(order) {
+  const url = new URL(window.location.href);
+  url.search = "";
+  url.hash = "";
+  url.searchParams.set("dono", "1");
+  url.hash = `pedido=${encodeOrderForUrl(order)}`;
+  return url.toString();
+}
+
+function encodeOrderForUrl(order) {
+  const payload = {
+    code: order.code,
+    date: order.date || new Date().toISOString(),
+    customer: order.customer,
+    checkout: order.checkout || order.customer,
+    store: order.store,
+    items: order.items,
+    subtotal: order.subtotal,
+    deliveryFee: order.deliveryFee,
+    total: order.total,
+    itemCount: order.itemCount,
+    text: order.text,
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function decodeOrderFromUrl(payload) {
+  try {
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return null;
+  }
+}
+
+function importSharedOrderFromUrl() {
+  const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
+  const payload = new URLSearchParams(hash).get("pedido");
+  if (!payload) return "";
+  const order = decodeOrderFromUrl(payload);
+  if (!order?.code || !Array.isArray(order.items)) {
+    showToast("Link do pedido invalido");
+    return "";
+  }
+  saveOrder(order);
+  return order.code;
+}
+
 async function copyOrder() {
-  const order = buildOrderText();
+  const order = addSellerLink(buildOrderText());
   await navigator.clipboard.writeText(order.text);
   saveOrder(order);
   showToast("Pedido copiado");
 }
 
 function sendWhatsApp() {
-  const order = buildOrderText();
+  const order = addSellerLink(buildOrderText());
   saveOrder(order);
   const phone = String(state.config.whatsapp || "").replace(/\D/g, "");
   const encodedText = encodeURIComponent(order.text);
@@ -743,20 +829,28 @@ function sendWhatsApp() {
 
 function saveOrder(order) {
   const orders = readJson(KEYS.orders, []);
-  orders.unshift({
+  const checkout = order.checkout || (typeof order.customer === "object" ? order.customer : {});
+  const customerName = typeof order.customer === "string"
+    ? order.customer
+    : checkout?.name || "Cliente";
+  const savedOrder = {
     code: order.code,
-    date: new Date().toISOString(),
-    customer: order.customer?.name || state.checkout.name || "Cliente",
+    date: order.date || new Date().toISOString(),
+    customer: customerName,
     total: order.total,
     itemCount: order.itemCount,
     items: order.items,
     subtotal: order.subtotal,
     deliveryFee: order.deliveryFee,
-    checkout: order.customer,
+    checkout,
     store: order.store,
     text: order.text,
-  });
-  writeJson(KEYS.orders, orders.slice(0, 20));
+    sellerUrl: order.sellerUrl || "",
+  };
+  writeJson(KEYS.orders, [
+    savedOrder,
+    ...orders.filter((item) => item.code !== savedOrder.code),
+  ].slice(0, 50));
 }
 
 function renderHistory() {
@@ -775,6 +869,164 @@ function renderHistory() {
         )
         .join("")
     : '<div class="empty-cart">Nenhum pedido salvo neste navegador</div>';
+}
+
+function handleSellerDashboardClick(event) {
+  const button = event.target.closest("button");
+  if (!button) return;
+
+  const orders = readJson(KEYS.orders, []);
+
+  if (button.dataset.viewSellerOrder) {
+    renderSellerDashboard(button.dataset.viewSellerOrder);
+    return;
+  }
+
+  const code = button.dataset.downloadSellerOrder || button.dataset.copySellerOrder;
+  const order = orders.find((item) => item.code === code);
+  if (!order) return;
+
+  if (button.dataset.downloadSellerOrder) {
+    downloadQuote(order);
+    return;
+  }
+
+  if (button.dataset.copySellerOrder) {
+    if (!navigator.clipboard) {
+      showToast("Copia nao disponivel neste navegador");
+      return;
+    }
+    navigator.clipboard.writeText(order.text || buildReadableOrderText(order)).then(
+      () => showToast("Mensagem do pedido copiada"),
+      () => showToast("Nao foi possivel copiar"),
+    );
+  }
+}
+
+function renderSellerDashboard(preferredCode = "") {
+  const orders = readJson(KEYS.orders, []);
+  const selectedCode = preferredCode || state.activeSellerOrderCode || orders[0]?.code || "";
+  const selectedOrder = orders.find((order) => order.code === selectedCode) || orders[0] || null;
+  state.activeSellerOrderCode = selectedOrder?.code || "";
+
+  refs.sellerOrders.innerHTML = orders.length
+    ? orders.map((order) => renderSellerOrderCard(order, state.activeSellerOrderCode)).join("")
+    : `
+        <div class="seller-empty">
+          <strong>Nenhum pedido aberto ainda</strong>
+          <span>Quando chegar um WhatsApp do cliente, clique no link da vendedora dentro da mensagem.</span>
+        </div>
+      `;
+
+  refs.sellerDetail.innerHTML = selectedOrder
+    ? renderSellerOrderDetail(selectedOrder)
+    : `
+        <div class="seller-detail-card seller-empty">
+          <strong>Aguardando pedido</strong>
+          <span>O pedido aberto pelo WhatsApp aparece aqui com itens, total e botao de Excel.</span>
+        </div>
+      `;
+}
+
+function renderSellerOrderCard(order, selectedCode) {
+  const active = order.code === selectedCode ? " is-active" : "";
+  return `
+    <article class="seller-order-card${active}">
+      <button type="button" data-view-seller-order="${escapeHtml(order.code)}">
+        <strong>${escapeHtml(order.code)}</strong>
+        <span>${escapeHtml(orderCustomerName(order))}</span>
+        <small>${escapeHtml(formatOrderDate(order.date))} - ${money.format(Number(order.total || 0))}</small>
+      </button>
+      <div>
+        <button class="primary-outline" type="button" data-download-seller-order="${escapeHtml(order.code)}">Excel</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderSellerOrderDetail(order) {
+  const checkout = order.checkout || {};
+  const items = order.items || [];
+  return `
+    <article class="seller-detail-card">
+      <div class="seller-detail-top">
+        <div>
+          <span>Pedido</span>
+          <h3>${escapeHtml(order.code)}</h3>
+          <small>${escapeHtml(formatOrderDate(order.date))}</small>
+        </div>
+        <strong>${money.format(Number(order.total || 0))}</strong>
+      </div>
+
+      <div class="seller-actions">
+        <button class="primary-outline" type="button" data-copy-seller-order="${escapeHtml(order.code)}">Copiar mensagem</button>
+        <button class="primary-button" type="button" data-download-seller-order="${escapeHtml(order.code)}">Baixar Excel</button>
+      </div>
+
+      <div class="seller-customer">
+        <div><span>Cliente</span><strong>${escapeHtml(orderCustomerName(order))}</strong></div>
+        <div><span>Telefone</span><strong>${escapeHtml(checkout.phone || "Nao informado")}</strong></div>
+        <div><span>Tipo</span><strong>${escapeHtml(checkout.mode === "entrega" ? "Entrega" : "Retirada")}</strong></div>
+        <div><span>Pagamento</span><strong>${escapeHtml(checkout.payment || "Nao informado")}</strong></div>
+        ${checkout.address ? `<div class="seller-wide"><span>Endereco</span><strong>${escapeHtml(checkout.address)}</strong></div>` : ""}
+        ${checkout.notes ? `<div class="seller-wide"><span>Observacao</span><strong>${escapeHtml(checkout.notes)}</strong></div>` : ""}
+      </div>
+
+      <div class="seller-items">
+        <div class="seller-item seller-item-head">
+          <span>Item</span>
+          <span>Qtd</span>
+          <span>Total</span>
+        </div>
+        ${items.map(renderSellerItem).join("")}
+      </div>
+
+      <div class="seller-total">
+        <div><span>Subtotal</span><strong>${money.format(Number(order.subtotal || 0))}</strong></div>
+        <div><span>Entrega</span><strong>${money.format(Number(order.deliveryFee || 0))}</strong></div>
+        <div><span>Total</span><strong>${money.format(Number(order.total || 0))}</strong></div>
+      </div>
+    </article>
+  `;
+}
+
+function renderSellerItem(item) {
+  return `
+    <div class="seller-item">
+      <span>
+        <strong>${escapeHtml(item.name)}</strong>
+        <small>${escapeHtml(item.tierLabel || "")} ${money.format(Number(item.unitPrice || 0))} cada</small>
+      </span>
+      <span>${Number(item.qty || 0)}</span>
+      <span>${money.format(Number(item.lineTotal || 0))}</span>
+    </div>
+  `;
+}
+
+function orderCustomerName(order) {
+  return order.checkout?.name || order.customer || "Cliente";
+}
+
+function formatOrderDate(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("pt-BR");
+}
+
+function buildReadableOrderText(order) {
+  const items = (order.items || []).map((item) => (
+    `- ${item.qty}x ${item.name} - ${money.format(Number(item.unitPrice || 0))} cada - ${money.format(Number(item.lineTotal || 0))}`
+  ));
+  return [
+    `NUMERO DO PEDIDO: ${order.code}`,
+    "",
+    `Cliente: ${orderCustomerName(order)}`,
+    `Telefone: ${order.checkout?.phone || "Nao informado"}`,
+    "",
+    "Itens:",
+    ...items,
+    "",
+    `Total: ${money.format(Number(order.total || 0))}`,
+  ].join("\n");
 }
 
 function makeOrderCode() {

@@ -44,10 +44,23 @@
 
       <section class="owner-notice" id="ownerNotice" hidden>
         <strong>Modo vendedora</strong>
-        <span>Historico local, configuracoes e Excel do orcamento ficam liberados nesta pagina.</span>
+        <span>Abra o link do pedido recebido pelo WhatsApp para visualizar e baixar o Excel.</span>
       </section>
 
-      <main class="main-layout">
+      <section class="seller-dashboard" id="sellerDashboard" hidden>
+        <div class="seller-header">
+          <div>
+            <h2>Pedidos recebidos</h2>
+            <p>Cada pedido aberto pelo link do WhatsApp fica salvo neste navegador.</p>
+          </div>
+        </div>
+        <div class="seller-grid">
+          <div class="seller-orders" id="sellerOrders"></div>
+          <div class="seller-detail" id="sellerDetail"></div>
+        </div>
+      </section>
+
+      <main class="main-layout" id="mainLayout">
         <section class="catalog-panel" aria-label="Catalogo">
           <div class="filters">
             <label class="search-box" for="searchInput">
