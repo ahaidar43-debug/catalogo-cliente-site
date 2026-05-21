@@ -726,9 +726,13 @@ function sendWhatsApp() {
   const order = buildOrderText();
   saveOrder(order);
   const phone = String(state.config.whatsapp || "").replace(/\D/g, "");
-  const base = phone ? `https://wa.me/${phone}` : "https://wa.me/";
-  window.open(`${base}?text=${encodeURIComponent(order.text)}`, "_blank", "noopener,noreferrer");
-  showToast(`Pedido ${order.code} enviado`);
+  const encodedText = encodeURIComponent(order.text);
+  const url = phone
+    ? `https://wa.me/${phone}?text=${encodedText}`
+    : `https://api.whatsapp.com/send?text=${encodedText}`;
+
+  navigator.clipboard?.writeText(order.text).catch(() => {});
+  window.location.href = url;
 }
 
 function saveOrder(order) {
