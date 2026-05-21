@@ -913,7 +913,7 @@ function renderSellerDashboard(preferredCode = "") {
     ? orders.map((order) => renderSellerOrderCard(order, state.activeSellerOrderCode)).join("")
     : `
         <div class="seller-empty">
-          <strong>Nenhum pedido aberto ainda</strong>
+          <strong>Nenhum pedido realizado aberto ainda</strong>
           <span>Quando chegar um WhatsApp do cliente, clique no link da vendedora dentro da mensagem.</span>
         </div>
       `;
@@ -923,7 +923,7 @@ function renderSellerDashboard(preferredCode = "") {
     : `
         <div class="seller-detail-card seller-empty">
           <strong>Aguardando pedido</strong>
-          <span>O pedido aberto pelo WhatsApp aparece aqui com itens, total e botao de Excel.</span>
+          <span>Ao acessar pelo link do WhatsApp, a vendedora cai direto no pedido com itens, total e botao de Excel.</span>
         </div>
       `;
 }
