@@ -193,21 +193,46 @@ async function ensureStore() {
 }
 
 async function seedDefaultUsers() {
-  if ((await listUsers()).length) return;
-
-  await createUser({
+  await ensureDefaultUser({
     name: process.env.ADMIN_NAME || "Administrador",
     username: (process.env.ADMIN_USERNAME || "admin").toLowerCase(),
     password: process.env.ADMIN_PASSWORD || "admin123",
     role: "admin",
   });
 
-  await createUser({
+  await ensureDefaultUser({
     name: process.env.SELLER_NAME || "Vendedora",
     username: (process.env.SELLER_USERNAME || "vendedora").toLowerCase(),
     password: process.env.SELLER_PASSWORD || "vendedora123",
     role: "seller",
   });
+}
+
+async function ensureDefaultUser({ name, username, password, role }) {
+  const existing = await findUserByUsername(username);
+  if (!existing) {
+    return createUser({ name, username, password, role });
+  }
+
+  if (!process.env.UPDATE_DEFAULT_PASSWORDS) return existing;
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  if (hasPostgres) {
+    const result = await pool.query(
+      `UPDATE users
+       SET name = $1, password_hash = $2, role = $3, active = TRUE
+       WHERE username = $4
+       RETURNING *`,
+      [name, passwordHash, role, username],
+    );
+    return result.rows[0];
+  }
+
+  const store = await loadFileStore();
+  const user = store.users.find((item) => item.username === username);
+  Object.assign(user, { name, password_hash: passwordHash, role, active: true });
+  await saveFileStore(store);
+  return user;
 }
 
 async function createUser({ name, username, password, role }) {

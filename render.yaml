@@ -21,6 +21,8 @@ services:
         value: vendedora
       - key: SELLER_PASSWORD
         sync: false
+      - key: UPDATE_DEFAULT_PASSWORDS
+        value: "1"
 
 databases:
   - name: catalogo-cliente-db
