@@ -1,0 +1,922 @@
+const DATA = window.CATALOG_DATA ?? {
+  store: { name: "Catalogo de Pecas", whatsapp: "", deliveryFee: 0 },
+  categories: [],
+  brands: [],
+  products: [],
+};
+
+const KEYS = {
+  cart: "catalogo.cart.v1",
+  config: "catalogo.config.v1",
+  checkout: "catalogo.checkout.v1",
+  orders: "catalogo.orders.v1",
+};
+
+const money = new Intl.NumberFormat("pt-BR", {
+  style: "currency",
+  currency: "BRL",
+});
+
+const state = {
+  query: "",
+  category: "",
+  brand: "",
+  visible: 72,
+  currentOrderCode: "",
+  cart: readJson(KEYS.cart, {}),
+  checkout: readJson(KEYS.checkout, {
+    name: "",
+    phone: "",
+    mode: "retirada",
+    address: "",
+    payment: "Pix",
+    notes: "",
+  }),
+  config: {
+    ...DATA.store,
+    ...(window.STORE_CONFIG ?? {}),
+    ...readJson(KEYS.config, {}),
+  },
+};
+
+const ownerMode = new URLSearchParams(window.location.search).has("dono")
+  || new URLSearchParams(window.location.search).has("admin");
+
+const refs = {
+  storeName: document.querySelector("#storeName"),
+  searchInput: document.querySelector("#searchInput"),
+  brandSelect: document.querySelector("#brandSelect"),
+  categoryStrip: document.querySelector("#categoryStrip"),
+  resultCount: document.querySelector("#resultCount"),
+  activeFilterLabel: document.querySelector("#activeFilterLabel"),
+  clearFiltersButton: document.querySelector("#clearFiltersButton"),
+  productGrid: document.querySelector("#productGrid"),
+  loadMoreButton: document.querySelector("#loadMoreButton"),
+  cartCount: document.querySelector("#cartCount"),
+  desktopCart: document.querySelector("#desktopCart"),
+  mobileCart: document.querySelector("#mobileCart"),
+  cartBackdrop: document.querySelector("#cartBackdrop"),
+  openCartButton: document.querySelector("#openCartButton"),
+  mobileOrderBar: document.querySelector("#mobileOrderBar"),
+  mobileOrderButton: document.querySelector("#mobileOrderButton"),
+  mobileOrderSummary: document.querySelector("#mobileOrderSummary"),
+  mobileOrderTotal: document.querySelector("#mobileOrderTotal"),
+  configButton: document.querySelector("#configButton"),
+  configDialog: document.querySelector("#configDialog"),
+  configForm: document.querySelector("#configForm"),
+  configStoreName: document.querySelector("#configStoreName"),
+  configWhatsapp: document.querySelector("#configWhatsapp"),
+  configDeliveryFee: document.querySelector("#configDeliveryFee"),
+  historyButton: document.querySelector("#historyButton"),
+  historyDialog: document.querySelector("#historyDialog"),
+  historyList: document.querySelector("#historyList"),
+  toast: document.querySelector("#toast"),
+};
+
+const activeProducts = DATA.products.filter((product) => product.active);
+const productsById = new Map(DATA.products.map((product) => [product.id, product]));
+const categoryCounts = activeProducts.reduce((map, product) => {
+  map.set(product.type, (map.get(product.type) ?? 0) + 1);
+  return map;
+}, new Map());
+
+init();
+
+function init() {
+  refs.historyButton.hidden = !ownerMode;
+  renderStore();
+  renderBrandOptions();
+  renderCategoryChips();
+  bindEvents();
+  renderProducts();
+  renderCart();
+}
+
+function readJson(key, fallback) {
+  try {
+    return JSON.parse(localStorage.getItem(key)) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJson(key, value) {
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
+function normalize(value) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function renderStore() {
+  refs.storeName.textContent = state.config.name || DATA.store.name || "Catalogo de Pecas";
+  refs.configStoreName.value = state.config.name || "";
+  refs.configWhatsapp.value = state.config.whatsapp || "";
+  refs.configDeliveryFee.value = Number(state.config.deliveryFee || 0).toFixed(2);
+}
+
+function renderBrandOptions() {
+  const brands = DATA.brands.filter(Boolean);
+  refs.brandSelect.innerHTML = [
+    '<option value="">Todas as marcas</option>',
+    ...brands.map((brand) => `<option value="${escapeHtml(brand)}">${escapeHtml(brand)}</option>`),
+  ].join("");
+}
+
+function renderCategoryChips() {
+  const categories = DATA.categories
+    .filter((category) => category.active && categoryCounts.has(category.name))
+    .map((category) => ({
+      ...category,
+      count: categoryCounts.get(category.name) ?? category.count,
+    }));
+
+  refs.categoryStrip.innerHTML = [
+    categoryButton("", "Todos", activeProducts.length),
+    ...categories.map((category) => categoryButton(category.name, category.name, category.count)),
+  ].join("");
+}
+
+function categoryButton(value, label, count) {
+  const active = state.category === value ? " is-active" : "";
+  return `
+    <button class="category-chip${active}" type="button" data-category="${escapeHtml(value)}">
+      ${escapeHtml(label)}
+      <span>${count}</span>
+    </button>
+  `;
+}
+
+function bindEvents() {
+  refs.searchInput.addEventListener("input", (event) => {
+    state.query = event.target.value;
+    state.visible = 72;
+    renderProducts();
+  });
+
+  refs.brandSelect.addEventListener("change", (event) => {
+    state.brand = event.target.value;
+    state.visible = 72;
+    renderProducts();
+  });
+
+  refs.categoryStrip.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-category]");
+    if (!button) return;
+    state.category = button.dataset.category;
+    state.visible = 72;
+    renderCategoryChips();
+    renderProducts();
+  });
+
+  refs.clearFiltersButton.addEventListener("click", () => {
+    state.query = "";
+    state.category = "";
+    state.brand = "";
+    state.visible = 72;
+    refs.searchInput.value = "";
+    refs.brandSelect.value = "";
+    renderCategoryChips();
+    renderProducts();
+  });
+
+  refs.loadMoreButton.addEventListener("click", () => {
+    state.visible += 72;
+    renderProducts();
+  });
+
+  refs.productGrid.addEventListener("click", (event) => {
+    const addButton = event.target.closest("[data-add-product]");
+    if (addButton) {
+      addProduct(addButton.dataset.addProduct);
+      return;
+    }
+
+    const increaseButton = event.target.closest("[data-increase]");
+    if (increaseButton) {
+      increaseProduct(increaseButton.dataset.increase);
+      return;
+    }
+
+    const decreaseButton = event.target.closest("[data-decrease]");
+    if (decreaseButton) {
+      decreaseProduct(decreaseButton.dataset.decrease);
+      return;
+    }
+
+    if (event.target.closest("[data-open-cart-mini]")) {
+      openMobileCart();
+    }
+  });
+
+  refs.desktopCart.addEventListener("click", handleCartClick);
+  refs.mobileCart.addEventListener("click", handleCartClick);
+
+  refs.openCartButton.addEventListener("click", openMobileCart);
+  refs.mobileOrderButton.addEventListener("click", openMobileCart);
+  refs.cartBackdrop.addEventListener("click", closeMobileCart);
+
+  refs.configButton.addEventListener("click", () => {
+    renderStore();
+    refs.configDialog.showModal();
+  });
+
+  refs.configForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    state.config = {
+      name: refs.configStoreName.value.trim() || "Catalogo de Pecas",
+      whatsapp: refs.configWhatsapp.value.replace(/\D/g, ""),
+      deliveryFee: Number(refs.configDeliveryFee.value || 0),
+    };
+    writeJson(KEYS.config, state.config);
+    renderStore();
+    renderCart();
+    refs.configDialog.close();
+    showToast("Configuracoes salvas");
+  });
+
+  refs.historyButton.addEventListener("click", () => {
+    renderHistory();
+    refs.historyDialog.showModal();
+  });
+
+  refs.historyList.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-download-history]");
+    if (!button) return;
+    const orders = readJson(KEYS.orders, []);
+    const order = orders.find((item) => item.code === button.dataset.downloadHistory);
+    if (order) downloadQuote(order);
+  });
+}
+
+function getFilteredProducts() {
+  const query = normalize(state.query);
+  const queryParts = query.split(/\s+/).filter(Boolean);
+
+  return activeProducts.filter((product) => {
+    if (state.category && product.type !== state.category) return false;
+    if (state.brand && product.brand !== state.brand) return false;
+    if (!queryParts.length) return true;
+
+    const haystack = normalize(`${product.name} ${product.brand} ${product.type} ${product.section} ${product.id}`);
+    return queryParts.every((part) => haystack.includes(part));
+  });
+}
+
+function renderProducts() {
+  const filtered = getFilteredProducts();
+  const visible = filtered.slice(0, state.visible);
+
+  refs.resultCount.textContent = `${filtered.length} ${filtered.length === 1 ? "produto" : "produtos"}`;
+  refs.activeFilterLabel.textContent = currentFilterLabel();
+  refs.loadMoreButton.hidden = filtered.length <= state.visible;
+
+  refs.productGrid.innerHTML = visible.length
+    ? visible.map(renderProductCard).join("")
+    : `<div class="empty-cart">Nenhum produto encontrado</div>`;
+}
+
+function currentFilterLabel() {
+  const labels = [];
+  if (state.category) labels.push(state.category);
+  if (state.brand) labels.push(state.brand);
+  if (state.query.trim()) labels.push(`Busca: ${state.query.trim()}`);
+  return labels.length ? labels.join(" / ") : "Todos os itens ativos";
+}
+
+function renderProductCard(product) {
+  const quantityInCart = state.cart[product.id] ?? 0;
+  const tiers = formatTiers(product);
+  const minQty = getInitialQty(product);
+  const photoUrl = getProductPhotoUrl(product);
+  const actions = quantityInCart
+    ? `
+        <div class="card-cart-actions">
+          <div class="qty-control">
+            <button type="button" data-decrease="${escapeHtml(product.id)}" aria-label="Diminuir quantidade">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11h14v2H5z" /></svg>
+            </button>
+            <output>${quantityInCart}</output>
+            <button type="button" data-increase="${escapeHtml(product.id)}" aria-label="Aumentar quantidade">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v14h-2zM5 11h14v2H5z" /></svg>
+            </button>
+          </div>
+          <button class="primary-outline" type="button" data-open-cart-mini="true">Ver pedido</button>
+        </div>
+      `
+    : `<button class="add-button" type="button" data-add-product="${escapeHtml(product.id)}">Adicionar</button>`;
+
+  return `
+    <article class="product-card">
+      <div class="product-visual${photoUrl ? " has-photo" : " no-photo"}">
+        ${
+          photoUrl
+            ? `<img class="product-photo" src="${escapeHtml(photoUrl)}" alt="${escapeHtml(product.name)}" loading="lazy" onerror="this.closest('.product-visual').classList.add('no-photo'); this.remove();" />`
+            : ""
+        }
+        <span class="type-badge">${escapeHtml(product.type)}</span>
+        <span class="part-symbol" aria-hidden="true">${escapeHtml(symbolFor(product.type))}</span>
+      </div>
+      <div class="product-body">
+        <h2>${escapeHtml(product.name)}</h2>
+        <div class="product-meta">
+          <span class="meta-pill">${escapeHtml(product.brand || "GERAL")}</span>
+          <span class="meta-pill">${escapeHtml(product.id)}</span>
+        </div>
+        <div class="price-line">
+          <strong>${money.format(product.price || bestVisiblePrice(product))}</strong>
+          <span>min. ${minQty} peca${minQty > 1 ? "s" : ""}</span>
+        </div>
+        <div class="tier-line">${escapeHtml(tiers)}</div>
+      </div>
+      <div class="product-actions">
+        ${actions}
+      </div>
+    </article>
+  `;
+}
+
+function getProductPhotoUrl(product) {
+  if (product.imageUrl) return product.imageUrl;
+  const mappedPhoto = window.PRODUCT_PHOTOS?.[product.id];
+  if (mappedPhoto) return mappedPhoto.startsWith("http") || mappedPhoto.startsWith("./")
+    ? mappedPhoto
+    : `./fotos/${mappedPhoto}`;
+  return "";
+}
+
+function symbolFor(type) {
+  const words = String(type || "CP")
+    .split(/\s+|\/|-/)
+    .filter(Boolean)
+    .slice(0, 2);
+  return words.map((word) => word[0]).join("").slice(0, 3).toUpperCase() || "CP";
+}
+
+function formatTiers(product) {
+  if (!product.tiers?.length) return "";
+  return product.tiers
+    .map((tier) => `${tier.minQty}+ ${money.format(tier.price)}`)
+    .join("  |  ");
+}
+
+function bestVisiblePrice(product) {
+  return product.tiers?.[0]?.price ?? product.price ?? 0;
+}
+
+function getInitialQty(product) {
+  const validMins = (product.tiers ?? [])
+    .map((tier) => Number(tier.minQty))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return Math.min(...validMins, Number(product.minQty) || 1);
+}
+
+function addProduct(productId) {
+  const product = productsById.get(productId);
+  if (!product) return;
+  const current = state.cart[productId] ?? 0;
+  state.cart[productId] = current ? current + 1 : getInitialQty(product);
+  state.currentOrderCode = "";
+  persistCart();
+  renderProducts();
+  renderCart();
+  showToast("Produto adicionado");
+}
+
+function handleCartClick(event) {
+  const button = event.target.closest("button");
+  if (!button) return;
+
+  if (button.dataset.closeCart) {
+    closeMobileCart();
+    return;
+  }
+
+  if (button.dataset.increase) {
+    increaseProduct(button.dataset.increase);
+    return;
+  }
+
+  if (button.dataset.decrease) {
+    decreaseProduct(button.dataset.decrease);
+    return;
+  }
+
+  if (button.dataset.remove) {
+    delete state.cart[button.dataset.remove];
+    state.currentOrderCode = "";
+    persistCart();
+    renderProducts();
+    renderCart();
+    return;
+  }
+
+  if (button.dataset.copyOrder) {
+    copyOrder();
+    return;
+  }
+
+  if (button.dataset.whatsappOrder) {
+    sendWhatsApp();
+    return;
+  }
+
+  if (button.dataset.downloadQuote) {
+    downloadQuote(buildOrderText());
+  }
+}
+
+function decreaseProduct(productId) {
+  const product = productsById.get(productId);
+  const min = product ? getInitialQty(product) : 1;
+  const current = state.cart[productId] ?? 0;
+
+  if (current <= min) {
+    delete state.cart[productId];
+  } else {
+    state.cart[productId] = current - 1;
+  }
+
+  state.currentOrderCode = "";
+  persistCart();
+  renderProducts();
+  renderCart();
+}
+
+function increaseProduct(productId) {
+  state.cart[productId] = (state.cart[productId] ?? 0) + 1;
+  state.currentOrderCode = "";
+  persistCart();
+  renderProducts();
+  renderCart();
+}
+
+function persistCart() {
+  writeJson(KEYS.cart, state.cart);
+  refs.cartCount.textContent = getCartItems().reduce((sum, item) => sum + item.qty, 0);
+}
+
+function getCartItems() {
+  return Object.entries(state.cart)
+    .map(([id, qty]) => {
+      const product = productsById.get(id);
+      if (!product || !qty) return null;
+      const tier = getPriceTier(product, qty);
+      const unitPrice = tier?.price ?? product.price ?? 0;
+      return {
+        product,
+        qty,
+        tier,
+        unitPrice,
+        lineTotal: unitPrice * qty,
+      };
+    })
+    .filter(Boolean);
+}
+
+function getPriceTier(product, qty) {
+  const tiers = [...(product.tiers ?? [])]
+    .filter((tier) => tier.price && tier.minQty)
+    .sort((a, b) => a.minQty - b.minQty);
+  let match = tiers[0] ?? null;
+
+  for (const tier of tiers) {
+    if (qty >= tier.minQty) match = tier;
+  }
+
+  return match;
+}
+
+function renderCart() {
+  persistCheckoutFromDom();
+  persistCart();
+  const cartHtml = buildCartHtml();
+  refs.desktopCart.innerHTML = cartHtml;
+  refs.mobileCart.innerHTML = cartHtml;
+  renderMobileOrderBar();
+  hydrateCheckoutForms();
+}
+
+function renderMobileOrderBar() {
+  const items = getCartItems();
+  const itemCount = items.reduce((sum, item) => sum + item.qty, 0);
+  const subtotal = items.reduce((sum, item) => sum + item.lineTotal, 0);
+  const deliveryFee = state.checkout.mode === "entrega" ? Number(state.config.deliveryFee || 0) : 0;
+  const total = subtotal + deliveryFee;
+
+  refs.mobileOrderBar.hidden = itemCount === 0;
+  refs.mobileOrderSummary.textContent = `${itemCount} ${itemCount === 1 ? "peca" : "pecas"} no carrinho`;
+  refs.mobileOrderTotal.textContent = money.format(total);
+}
+
+function buildCartHtml() {
+  const items = getCartItems();
+  const subtotal = items.reduce((sum, item) => sum + item.lineTotal, 0);
+  const deliveryFee = state.checkout.mode === "entrega" ? Number(state.config.deliveryFee || 0) : 0;
+  const total = subtotal + deliveryFee;
+  const disabled = items.length ? "" : "disabled";
+  const ownerActionClass = ownerMode ? " checkout-actions-owner" : "";
+
+  return `
+    <div class="cart-shell">
+      <div class="cart-header">
+        <div>
+          <h2>Carrinho</h2>
+          <span>${items.length} ${items.length === 1 ? "item" : "itens"}</span>
+        </div>
+        <button class="icon-button mobile-only" type="button" data-close-cart="true" aria-label="Fechar carrinho" title="Fechar carrinho">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m6.4 5 12.6 12.6-1.4 1.4L5 6.4 6.4 5Zm12.6 1.4L6.4 19 5 17.6 17.6 5 19 6.4Z" />
+          </svg>
+        </button>
+      </div>
+
+      <div class="cart-scroll">
+        ${
+          items.length
+            ? items.map(renderCartItem).join("")
+            : '<div class="empty-cart">Seu carrinho esta vazio</div>'
+        }
+      </div>
+
+      <div class="cart-footer">
+        <div class="summary-lines">
+          <div><span>Subtotal</span><strong>${money.format(subtotal)}</strong></div>
+          <div><span>Entrega</span><strong>${money.format(deliveryFee)}</strong></div>
+          <div class="total"><span>Total</span><strong>${money.format(total)}</strong></div>
+        </div>
+
+        <form class="checkout-form" data-checkout-form>
+          <label>Nome
+            <input name="name" type="text" autocomplete="name" value="${escapeHtml(state.checkout.name)}" />
+          </label>
+          <label>Telefone
+            <input name="phone" type="tel" autocomplete="tel" value="${escapeHtml(state.checkout.phone)}" />
+          </label>
+          <label>Tipo
+            <select name="mode">
+              <option value="retirada" ${state.checkout.mode === "retirada" ? "selected" : ""}>Retirada</option>
+              <option value="entrega" ${state.checkout.mode === "entrega" ? "selected" : ""}>Entrega</option>
+            </select>
+          </label>
+          <label>Endereco
+            <textarea name="address" rows="2">${escapeHtml(state.checkout.address)}</textarea>
+          </label>
+          <label>Pagamento
+            <select name="payment">
+              ${["Pix", "Dinheiro", "Cartao", "A combinar"]
+                .map((value) => `<option value="${value}" ${state.checkout.payment === value ? "selected" : ""}>${value}</option>`)
+                .join("")}
+            </select>
+          </label>
+          <label>Observacao
+            <textarea name="notes" rows="2">${escapeHtml(state.checkout.notes)}</textarea>
+          </label>
+        </form>
+
+        <div class="checkout-actions${ownerActionClass}">
+          ${ownerMode ? `<button class="primary-outline" type="button" data-download-quote="true" ${disabled}>Excel</button>` : ""}
+          <button class="primary-outline" type="button" data-copy-order="true" ${disabled}>Copiar</button>
+          <button class="checkout-button" type="button" data-whatsapp-order="true" ${disabled}>Enviar pedido</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderCartItem(item) {
+  return `
+    <div class="cart-item">
+      <div class="cart-item-title">
+        <strong>${escapeHtml(item.product.name)}</strong>
+        <span>${money.format(item.lineTotal)}</span>
+      </div>
+      <small>${escapeHtml(item.tier?.label ?? "")} - ${money.format(item.unitPrice)} cada</small>
+      <div class="qty-control">
+        <button type="button" data-decrease="${escapeHtml(item.product.id)}" aria-label="Diminuir">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11h14v2H5z" /></svg>
+        </button>
+        <output>${item.qty}</output>
+        <button type="button" data-increase="${escapeHtml(item.product.id)}" aria-label="Aumentar">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v14h-2zM5 11h14v2H5z" /></svg>
+        </button>
+      </div>
+      <button class="text-button" type="button" data-remove="${escapeHtml(item.product.id)}">Remover</button>
+    </div>
+  `;
+}
+
+function hydrateCheckoutForms() {
+  document.querySelectorAll("[data-checkout-form]").forEach((form) => {
+    form.addEventListener("input", () => {
+      readCheckoutForm(form);
+      writeJson(KEYS.checkout, state.checkout);
+      updateTotalsOnly();
+    });
+    form.addEventListener("change", () => {
+      readCheckoutForm(form);
+      writeJson(KEYS.checkout, state.checkout);
+      renderCart();
+    });
+  });
+}
+
+function persistCheckoutFromDom() {
+  const form = document.querySelector("[data-checkout-form]");
+  if (form) {
+    readCheckoutForm(form);
+    writeJson(KEYS.checkout, state.checkout);
+  }
+}
+
+function readCheckoutForm(form) {
+  const formData = new FormData(form);
+  state.checkout = {
+    name: String(formData.get("name") ?? ""),
+    phone: String(formData.get("phone") ?? ""),
+    mode: String(formData.get("mode") ?? "retirada"),
+    address: String(formData.get("address") ?? ""),
+    payment: String(formData.get("payment") ?? "Pix"),
+    notes: String(formData.get("notes") ?? ""),
+  };
+}
+
+function updateTotalsOnly() {
+  const items = getCartItems();
+  const subtotal = items.reduce((sum, item) => sum + item.lineTotal, 0);
+  const deliveryFee = state.checkout.mode === "entrega" ? Number(state.config.deliveryFee || 0) : 0;
+  const total = subtotal + deliveryFee;
+  document.querySelectorAll(".summary-lines").forEach((summary) => {
+    const rows = summary.querySelectorAll("strong");
+    if (rows[0]) rows[0].textContent = money.format(subtotal);
+    if (rows[1]) rows[1].textContent = money.format(deliveryFee);
+    if (rows[2]) rows[2].textContent = money.format(total);
+  });
+}
+
+function buildOrderText() {
+  persistCheckoutFromDom();
+  const items = getCartItems();
+  const subtotal = items.reduce((sum, item) => sum + item.lineTotal, 0);
+  const deliveryFee = state.checkout.mode === "entrega" ? Number(state.config.deliveryFee || 0) : 0;
+  const total = subtotal + deliveryFee;
+  const orderCode = state.currentOrderCode || makeOrderCode();
+  state.currentOrderCode = orderCode;
+
+  const itemLines = items.map((item) => {
+    const tierLabel = item.tier?.label ? ` (${item.tier.label})` : "";
+    return `- ${item.qty}x ${item.product.name}${tierLabel} - ${money.format(item.unitPrice)} cada - ${money.format(item.lineTotal)}`;
+  });
+
+  return {
+    code: orderCode,
+    customer: { ...state.checkout },
+    store: { ...state.config },
+    items: items.map((item) => ({
+      id: item.product.id,
+      name: item.product.name,
+      qty: item.qty,
+      unitPrice: item.unitPrice,
+      lineTotal: item.lineTotal,
+      tierLabel: item.tier?.label ?? "",
+    })),
+    subtotal,
+    deliveryFee,
+    total,
+    itemCount: items.reduce((sum, item) => sum + item.qty, 0),
+    text: [
+      `NUMERO DO PEDIDO: ${orderCode}`,
+      "",
+      "Ola, fiz um pedido pelo catalogo.",
+      "Segue para conferencia e cobranca:",
+      "",
+      `Loja: ${state.config.name || DATA.store.name || "Catalogo"}`,
+      "",
+      `Cliente: ${state.checkout.name || "Nao informado"}`,
+      `Telefone: ${state.checkout.phone || "Nao informado"}`,
+      `Tipo: ${state.checkout.mode === "entrega" ? "Entrega" : "Retirada"}`,
+      state.checkout.mode === "entrega" ? `Endereco: ${state.checkout.address || "Nao informado"}` : "",
+      `Pagamento: ${state.checkout.payment || "Nao informado"}`,
+      state.checkout.notes ? `Observacao: ${state.checkout.notes}` : "",
+      "",
+      "Itens:",
+      ...itemLines,
+      "",
+      `Subtotal: ${money.format(subtotal)}`,
+      `Entrega: ${money.format(deliveryFee)}`,
+      `Total: ${money.format(total)}`,
+    ]
+      .filter((line) => line !== "")
+      .join("\n"),
+  };
+}
+
+async function copyOrder() {
+  const order = buildOrderText();
+  await navigator.clipboard.writeText(order.text);
+  saveOrder(order);
+  showToast("Pedido copiado");
+}
+
+function sendWhatsApp() {
+  const order = buildOrderText();
+  saveOrder(order);
+  const phone = String(state.config.whatsapp || "").replace(/\D/g, "");
+  const base = phone ? `https://wa.me/${phone}` : "https://wa.me/";
+  window.open(`${base}?text=${encodeURIComponent(order.text)}`, "_blank", "noopener,noreferrer");
+  showToast(`Pedido ${order.code} enviado`);
+}
+
+function saveOrder(order) {
+  const orders = readJson(KEYS.orders, []);
+  orders.unshift({
+    code: order.code,
+    date: new Date().toISOString(),
+    customer: order.customer?.name || state.checkout.name || "Cliente",
+    total: order.total,
+    itemCount: order.itemCount,
+    items: order.items,
+    subtotal: order.subtotal,
+    deliveryFee: order.deliveryFee,
+    checkout: order.customer,
+    store: order.store,
+    text: order.text,
+  });
+  writeJson(KEYS.orders, orders.slice(0, 20));
+}
+
+function renderHistory() {
+  const orders = readJson(KEYS.orders, []);
+  refs.historyList.innerHTML = orders.length
+    ? orders
+        .map(
+          (order) => `
+            <div class="history-item">
+              <strong>${escapeHtml(order.code)}</strong>
+              <span>${escapeHtml(order.customer)} - ${money.format(order.total || 0)}</span>
+              <small>${new Date(order.date).toLocaleString("pt-BR")} - ${order.itemCount} pecas</small>
+              ${ownerMode && order.items?.length ? `<button class="primary-outline" type="button" data-download-history="${escapeHtml(order.code)}">Baixar Excel</button>` : ""}
+            </div>
+          `,
+        )
+        .join("")
+    : '<div class="empty-cart">Nenhum pedido salvo neste navegador</div>';
+}
+
+function makeOrderCode() {
+  const date = new Date();
+  const pad = (value) => String(value).padStart(2, "0");
+  return `ORC-${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}
+
+function downloadQuote(order) {
+  if (!ownerMode) {
+    showToast("Orcamento Excel disponivel apenas no modo dono");
+    return;
+  }
+
+  const normalizedOrder = normalizeOrderForQuote(order);
+  if (!normalizedOrder.items.length) {
+    showToast("Carrinho vazio");
+    return;
+  }
+
+  const html = buildQuoteHtml(normalizedOrder);
+  const blob = new Blob(["\ufeff", html], {
+    type: "application/vnd.ms-excel;charset=utf-8",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${safeFileName(normalizedOrder.code)}-${safeFileName(normalizedOrder.customerName || "CLIENTE")}.xls`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  showToast("Orcamento Excel gerado");
+}
+
+function normalizeOrderForQuote(order) {
+  const currentItems = order.items?.length
+    ? order.items
+    : getCartItems().map((item) => ({
+        name: item.product.name,
+        qty: item.qty,
+        unitPrice: item.unitPrice,
+        lineTotal: item.lineTotal,
+      }));
+  const subtotal = order.subtotal ?? currentItems.reduce((sum, item) => sum + Number(item.lineTotal || 0), 0);
+  const deliveryFee = order.deliveryFee ?? 0;
+
+  return {
+    code: order.code || state.currentOrderCode || makeOrderCode(),
+    customerName: order.checkout?.name || order.customer?.name || state.checkout.name || "Cliente",
+    responsible: "Administrador",
+    items: currentItems,
+    subtotal,
+    deliveryFee,
+    total: order.total ?? subtotal + deliveryFee,
+  };
+}
+
+function buildQuoteHtml(order) {
+  const rows = order.items
+    .map(
+      (item) => `
+        <tr>
+          <td>${escapeHtml(`${item.qty}x ${item.name}`)}</td>
+          <td class="money">${Number(item.unitPrice || 0).toFixed(2)}</td>
+          <td class="money">${Number(item.lineTotal || 0).toFixed(2)}</td>
+        </tr>
+      `,
+    )
+    .join("");
+
+  const deliveryRow = order.deliveryFee
+    ? `
+        <tr>
+          <td>Taxa de entrega</td>
+          <td></td>
+          <td class="money">${Number(order.deliveryFee || 0).toFixed(2)}</td>
+        </tr>
+      `
+    : "";
+
+  return `
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <style>
+          table { border-collapse: collapse; font-family: Arial, sans-serif; font-size: 12pt; }
+          td, th { border: 1px solid #d9d9d9; padding: 8px 10px; }
+          .title td { border: 0; font-weight: 700; font-size: 14pt; }
+          .spacer td { border: 0; height: 14px; }
+          th { background: #f2f2f2; font-weight: 700; text-align: left; }
+          .money { mso-number-format: "R$ #,##0.00"; text-align: right; }
+          .total td { font-weight: 700; background: #f7f7f7; }
+          .item { width: 420px; }
+          .value { width: 150px; }
+        </style>
+      </head>
+      <body>
+        <table>
+          <tr class="title"><td colspan="3">Cliente: ${escapeHtml(order.customerName)}</td></tr>
+          <tr class="title"><td colspan="3">${escapeHtml(order.code)} | Responsavel: ${escapeHtml(order.responsible)}</td></tr>
+          <tr class="spacer"><td colspan="3"></td></tr>
+          <tr>
+            <th class="item">Item</th>
+            <th class="value">Valor unitario</th>
+            <th class="value">Valor total do item</th>
+          </tr>
+          ${rows}
+          ${deliveryRow}
+          <tr class="total">
+            <td>Total do orcamento</td>
+            <td></td>
+            <td class="money">${Number(order.total || 0).toFixed(2)}</td>
+          </tr>
+        </table>
+      </body>
+    </html>
+  `;
+}
+
+function safeFileName(value) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "orcamento";
+}
+
+function openMobileCart() {
+  refs.cartBackdrop.hidden = false;
+  refs.mobileCart.classList.add("is-open");
+  refs.mobileCart.setAttribute("aria-hidden", "false");
+}
+
+function closeMobileCart() {
+  refs.mobileCart.classList.remove("is-open");
+  refs.mobileCart.setAttribute("aria-hidden", "true");
+  refs.cartBackdrop.hidden = true;
+}
+
+function showToast(message) {
+  refs.toast.textContent = message;
+  refs.toast.classList.add("is-visible");
+  clearTimeout(showToast.timer);
+  showToast.timer = setTimeout(() => refs.toast.classList.remove("is-visible"), 1800);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}

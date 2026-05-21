@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: catalogo-cliente
+    runtime: static
+    buildCommand: ""
+    staticPublishPath: .

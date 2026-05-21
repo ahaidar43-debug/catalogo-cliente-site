@@ -1,0 +1,26 @@
+COMO USAR COM CLIENTES
+
+1. Antes de publicar, coloque seu WhatsApp em store-config.js.
+
+Exemplo:
+window.STORE_CONFIG = {
+  name: "Nome da sua loja",
+  whatsapp: "5599999999999",
+  deliveryFee: 0
+};
+
+Use o numero com DDI e DDD, somente numeros.
+
+2. Publique todos os arquivos desta pasta em uma hospedagem.
+
+Pode usar Netlify, Vercel, Hostinger ou qualquer hospedagem de site estatico.
+
+3. Envie o link publicado para o cliente.
+
+O cliente escolhe os produtos, preenche os dados e clica em Enviar pedido.
+O WhatsApp abre com o NUMERO DO PEDIDO e os itens escolhidos.
+
+Observacao:
+Se voce quiser receber apenas o numero do pedido e consultar os itens em um painel,
+precisa de uma versao com banco de dados/login. Esta versao estatica envia o numero
+junto com os itens pelo WhatsApp.

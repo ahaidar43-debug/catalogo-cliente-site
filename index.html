@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Catalogo de Pecas</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2318855b'/%3E%3Cpath d='M18 20h28v7H18zm0 12h28v7H18zm0 12h18v7H18z' fill='white'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">CP</span>
+          <div>
+            <h1 id="storeName">Catalogo de Pecas</h1>
+            <p>Pedido online</p>
+          </div>
+        </div>
+
+        <div class="top-actions">
+          <button class="icon-button" id="historyButton" type="button" aria-label="Pedidos salvos" title="Pedidos salvos">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M7 3h10v4h3v14H4V7h3V3Zm2 4h6V5H9v2Zm-3 2v10h12V9H6Zm3 3h6v2H9v-2Z" />
+            </svg>
+          </button>
+          <button class="icon-button" id="configButton" type="button" aria-label="Configuracoes" title="Configuracoes">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M19.4 13.5c.1-.5.1-1 .1-1.5s0-1-.1-1.5l2-1.5-2-3.5-2.4 1a8.2 8.2 0 0 0-2.6-1.5L14 2h-4l-.4 2.5A8.2 8.2 0 0 0 7 6L4.6 5 2.6 8.5l2 1.5c-.1.5-.1 1-.1 1.5s0 1 .1 1.5l-2 1.5 2 3.5 2.4-1a8.2 8.2 0 0 0 2.6 1.5L10 22h4l.4-2.5A8.2 8.2 0 0 0 17 18l2.4 1 2-3.5-2-1.5ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z" />
+            </svg>
+          </button>
+          <button class="cart-pill" id="openCartButton" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M7 18a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm10 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4ZM5.2 5l.5 2H21l-2.1 8H7.2L4.7 3H2v2h3.2Z" />
+            </svg>
+            <span>Carrinho</span>
+            <strong id="cartCount">0</strong>
+          </button>
+        </div>
+      </header>
+
+      <main class="main-layout">
+        <section class="catalog-panel" aria-label="Catalogo">
+          <div class="filters">
+            <label class="search-box" for="searchInput">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m21 19.6-5.2-5.2a7 7 0 1 0-1.4 1.4l5.2 5.2 1.4-1.4ZM5 10a5 5 0 1 1 10 0A5 5 0 0 1 5 10Z" />
+              </svg>
+              <input id="searchInput" type="search" placeholder="Buscar por produto, modelo ou marca" autocomplete="off" />
+            </label>
+
+            <select id="brandSelect" aria-label="Filtrar por marca">
+              <option value="">Todas as marcas</option>
+            </select>
+          </div>
+
+          <nav class="category-strip" id="categoryStrip" aria-label="Categorias"></nav>
+
+          <div class="result-bar">
+            <div>
+              <strong id="resultCount">0 produtos</strong>
+              <span id="activeFilterLabel">Todos os itens ativos</span>
+            </div>
+            <button class="text-button" id="clearFiltersButton" type="button">Limpar filtros</button>
+          </div>
+
+          <div class="product-grid" id="productGrid"></div>
+
+          <div class="load-more-wrap">
+            <button class="primary-outline" id="loadMoreButton" type="button">Carregar mais</button>
+          </div>
+        </section>
+
+        <aside class="cart-panel" id="desktopCart" aria-label="Carrinho"></aside>
+      </main>
+    </div>
+
+    <div class="drawer-backdrop" id="cartBackdrop" hidden></div>
+    <aside class="mobile-cart" id="mobileCart" aria-label="Carrinho" aria-hidden="true"></aside>
+    <div class="mobile-order-bar" id="mobileOrderBar" hidden>
+      <button type="button" id="mobileOrderButton">
+        <div>
+          <strong>Ver pedido</strong>
+          <span id="mobileOrderSummary">0 itens</span>
+        </div>
+        <span id="mobileOrderTotal">R$ 0,00</span>
+      </button>
+    </div>
+
+    <dialog class="modal" id="configDialog">
+      <form method="dialog" class="modal-card" id="configForm">
+        <div class="modal-header">
+          <h2>Configuracoes</h2>
+          <button class="icon-button" value="cancel" type="submit" aria-label="Fechar" title="Fechar">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m6.4 5 12.6 12.6-1.4 1.4L5 6.4 6.4 5Zm12.6 1.4L6.4 19 5 17.6 17.6 5 19 6.4Z" />
+            </svg>
+          </button>
+        </div>
+        <label>
+          Nome da loja
+          <input id="configStoreName" type="text" autocomplete="organization" />
+        </label>
+        <label>
+          WhatsApp para receber pedidos
+          <input id="configWhatsapp" type="tel" placeholder="5599999999999" inputmode="numeric" />
+        </label>
+        <label>
+          Taxa de entrega
+          <input id="configDeliveryFee" type="number" min="0" step="0.01" />
+        </label>
+        <div class="modal-actions">
+          <button class="primary-button" id="saveConfigButton" value="default" type="submit">Salvar</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="modal" id="historyDialog">
+      <form method="dialog" class="modal-card history-card">
+        <div class="modal-header">
+          <h2>Pedidos salvos</h2>
+          <button class="icon-button" value="cancel" type="submit" aria-label="Fechar" title="Fechar">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m6.4 5 12.6 12.6-1.4 1.4L5 6.4 6.4 5Zm12.6 1.4L6.4 19 5 17.6 17.6 5 19 6.4Z" />
+            </svg>
+          </button>
+        </div>
+        <div id="historyList" class="history-list"></div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <script src="./catalog-data.js"></script>
+    <script src="./store-config.js"></script>
+    <script src="./photo-map.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
