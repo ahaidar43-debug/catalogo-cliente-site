@@ -942,7 +942,7 @@ select:focus,
 
 .qty-control {
   display: inline-grid;
-  grid-template-columns: 34px minmax(38px, auto) 34px;
+  grid-template-columns: 34px minmax(46px, 62px) 34px;
   align-items: center;
   width: max-content;
   overflow: hidden;
@@ -974,6 +974,35 @@ select:focus,
   padding: 0 8px;
   text-align: center;
   font-weight: 900;
+}
+
+.qty-control input {
+  width: 100%;
+  height: 34px;
+  min-width: 0;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 900;
+  text-align: center;
+}
+
+.qty-control input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.qty-control input::-webkit-outer-spin-button,
+.qty-control input::-webkit-inner-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
+.qty-control input[type="number"] {
+  -moz-appearance: textfield;
 }
 
 .cart-footer {

@@ -277,9 +277,12 @@ function bindEvents() {
       openMobileCart();
     }
   });
+  refs.productGrid.addEventListener("change", handleQuantityChange);
 
   refs.desktopCart.addEventListener("click", handleCartClick);
   refs.mobileCart.addEventListener("click", handleCartClick);
+  refs.desktopCart.addEventListener("change", handleQuantityChange);
+  refs.mobileCart.addEventListener("change", handleQuantityChange);
 
   refs.openCartButton.addEventListener("click", openMobileCart);
   refs.mobileOrderButton.addEventListener("click", openMobileCart);
@@ -368,7 +371,7 @@ function renderProductCard(product) {
             <button type="button" data-decrease="${escapeHtml(product.id)}" aria-label="Diminuir quantidade">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11h14v2H5z" /></svg>
             </button>
-            <output>${quantityInCart}</output>
+            <input class="qty-input" type="number" inputmode="numeric" min="${minQty}" step="1" value="${quantityInCart}" data-set-qty="${escapeHtml(product.id)}" aria-label="Quantidade de ${escapeHtml(product.name)}" />
             <button type="button" data-increase="${escapeHtml(product.id)}" aria-label="Aumentar quantidade">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v14h-2zM5 11h14v2H5z" /></svg>
             </button>
@@ -498,6 +501,12 @@ function handleCartClick(event) {
   }
 }
 
+function handleQuantityChange(event) {
+  const input = event.target.closest("[data-set-qty]");
+  if (!input) return;
+  setProductQuantity(input.dataset.setQty, input.value);
+}
+
 function decreaseProduct(productId) {
   const product = productsById.get(productId);
   const min = product ? getInitialQty(product) : 1;
@@ -517,6 +526,19 @@ function decreaseProduct(productId) {
 
 function increaseProduct(productId) {
   state.cart[productId] = (state.cart[productId] ?? 0) + 1;
+  state.currentOrderCode = "";
+  persistCart();
+  renderProducts();
+  renderCart();
+}
+
+function setProductQuantity(productId, value) {
+  const product = productsById.get(productId);
+  if (!product) return;
+
+  const min = getInitialQty(product);
+  const parsed = Number.parseInt(String(value), 10);
+  state.cart[productId] = Number.isFinite(parsed) ? Math.max(parsed, min) : min;
   state.currentOrderCode = "";
   persistCart();
   renderProducts();
@@ -657,6 +679,8 @@ function buildCartHtml() {
 }
 
 function renderCartItem(item) {
+  const minQty = getInitialQty(item.product);
+
   return `
     <div class="cart-item">
       <div class="cart-item-title">
@@ -668,7 +692,7 @@ function renderCartItem(item) {
         <button type="button" data-decrease="${escapeHtml(item.product.id)}" aria-label="Diminuir">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11h14v2H5z" /></svg>
         </button>
-        <output>${item.qty}</output>
+        <input class="qty-input" type="number" inputmode="numeric" min="${minQty}" step="1" value="${item.qty}" data-set-qty="${escapeHtml(item.product.id)}" aria-label="Quantidade de ${escapeHtml(item.product.name)}" />
         <button type="button" data-increase="${escapeHtml(item.product.id)}" aria-label="Aumentar">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v14h-2zM5 11h14v2H5z" /></svg>
         </button>
