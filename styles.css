@@ -347,6 +347,18 @@ body.owner-mode .topbar {
   gap: 10px;
 }
 
+.seller-admin-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.seller-admin-tabs .is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+}
+
 .seller-user-form {
   grid-template-columns: 1fr;
 }
@@ -384,6 +396,151 @@ body.owner-mode .topbar {
   color: var(--muted);
   font-size: 13px;
   font-weight: 700;
+}
+
+.admin-catalog-panel {
+  align-content: start;
+}
+
+.admin-catalog-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(160px, 220px);
+  gap: 10px;
+}
+
+.admin-catalog-controls label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.admin-catalog-controls input,
+.admin-catalog-controls select,
+.admin-product-actions input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: white;
+  padding: 10px 11px;
+  font-weight: 700;
+}
+
+.admin-product-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.admin-product-list {
+  display: grid;
+  gap: 10px;
+}
+
+.admin-product-card {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fffdfa;
+}
+
+.admin-product-preview {
+  display: grid;
+  width: 72px;
+  aspect-ratio: 1;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+  color: var(--accent-dark);
+  font-weight: 900;
+}
+
+.admin-product-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.admin-product-info {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.admin-product-info strong {
+  display: block;
+  color: var(--ink);
+  line-height: 1.25;
+}
+
+.admin-product-info small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.admin-status {
+  width: max-content;
+  max-width: 100%;
+  padding: 5px 8px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.admin-status.is-active {
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+}
+
+.admin-status.is-inactive {
+  background: #fff0f0;
+  color: #8d2626;
+}
+
+.admin-product-actions {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: 120px 120px minmax(180px, 1fr) 118px 102px;
+  gap: 8px;
+  align-items: center;
+}
+
+.admin-file-button {
+  display: grid;
+  min-height: 42px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--accent-dark);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.admin-file-button input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+}
+
+.admin-load-more {
+  justify-self: center;
+  min-width: min(260px, 100%);
 }
 
 .brand {
@@ -1267,6 +1424,25 @@ select:focus,
 
   .seller-customer {
     grid-template-columns: 1fr;
+  }
+
+  .admin-catalog-controls,
+  .admin-product-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-product-summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .admin-product-card {
+    grid-template-columns: 58px minmax(0, 1fr);
+    padding: 10px;
+  }
+
+  .admin-product-preview {
+    width: 58px;
   }
 
   .seller-item {

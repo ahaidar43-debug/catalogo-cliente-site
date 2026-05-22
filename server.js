@@ -28,7 +28,7 @@ const pool = hasPostgres
 
 const app = express();
 app.set("trust proxy", true);
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "8mb" }));
 
 await ensureStore();
 
@@ -88,6 +88,29 @@ app.post("/api/users", requireAuth(["admin"]), async (req, res) => {
     }
     throw error;
   }
+});
+
+app.get("/api/catalog-overrides", async (_req, res) => {
+  res.json({ overrides: await listProductOverrides() });
+});
+
+app.patch("/api/products/:id", requireAuth(["admin"]), async (req, res) => {
+  let imageUrl;
+  try {
+    imageUrl = Object.hasOwn(req.body || {}, "imageUrl") ? cleanImageUrl(req.body.imageUrl) : undefined;
+  } catch {
+    res.status(400).json({ error: "Use um link http/https ou uma imagem valida" });
+    return;
+  }
+
+  const active = typeof req.body?.active === "boolean" ? req.body.active : undefined;
+  if (active === undefined && imageUrl === undefined) {
+    res.status(400).json({ error: "Informe o que deseja alterar no item" });
+    return;
+  }
+
+  const override = await upsertProductOverride(req.params.id, { active, imageUrl }, req.user.id);
+  res.json({ override });
 });
 
 app.post("/api/orders", async (req, res) => {
@@ -195,6 +218,15 @@ async function ensureStore() {
         details JSONB NOT NULL DEFAULT '{}'::jsonb,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+
+      CREATE TABLE IF NOT EXISTS product_overrides (
+        id SERIAL PRIMARY KEY,
+        product_id TEXT UNIQUE NOT NULL,
+        active BOOLEAN,
+        image_url TEXT NOT NULL DEFAULT '',
+        updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
     `);
   } else {
     await loadFileStore();
@@ -298,6 +330,68 @@ async function findUserById(id) {
     return result.rows[0] || null;
   }
   return (await loadFileStore()).users.find((user) => Number(user.id) === Number(id)) || null;
+}
+
+async function listProductOverrides() {
+  if (hasPostgres) {
+    const result = await pool.query(
+      `SELECT product_id, active, image_url, updated_at
+       FROM product_overrides
+       ORDER BY updated_at DESC`,
+    );
+    return result.rows.map(productOverrideForApi);
+  }
+
+  const store = await loadFileStore();
+  return store.productOverrides.map(productOverrideForApi);
+}
+
+async function findProductOverride(productId) {
+  if (hasPostgres) {
+    const result = await pool.query("SELECT * FROM product_overrides WHERE product_id = $1", [productId]);
+    return result.rows[0] || null;
+  }
+
+  const store = await loadFileStore();
+  return store.productOverrides.find((item) => item.product_id === productId) || null;
+}
+
+async function upsertProductOverride(productId, patch, userId) {
+  const cleanProductId = cleanText(productId).slice(0, 120);
+  const existing = await findProductOverride(cleanProductId);
+  const next = {
+    product_id: cleanProductId,
+    active: patch.active === undefined ? existing?.active ?? null : patch.active,
+    image_url: patch.imageUrl === undefined ? existing?.image_url ?? "" : patch.imageUrl,
+  };
+
+  if (hasPostgres) {
+    const result = await pool.query(
+      `INSERT INTO product_overrides (product_id, active, image_url, updated_by, updated_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (product_id) DO UPDATE SET
+        active = EXCLUDED.active,
+        image_url = EXCLUDED.image_url,
+        updated_by = EXCLUDED.updated_by,
+        updated_at = NOW()
+       RETURNING product_id, active, image_url, updated_at`,
+      [next.product_id, next.active, next.image_url, userId],
+    );
+    return productOverrideForApi(result.rows[0]);
+  }
+
+  const store = await loadFileStore();
+  const updated = {
+    ...next,
+    updated_by: userId,
+    updated_at: new Date().toISOString(),
+  };
+  store.productOverrides = [
+    updated,
+    ...store.productOverrides.filter((item) => item.product_id !== cleanProductId),
+  ];
+  await saveFileStore(store);
+  return productOverrideForApi(updated);
 }
 
 async function upsertOrder(input, baseUrl) {
@@ -559,6 +653,15 @@ function eventForApi(event) {
   };
 }
 
+function productOverrideForApi(override) {
+  return {
+    productId: override.product_id,
+    active: typeof override.active === "boolean" ? override.active : override.active ?? null,
+    imageUrl: override.image_url || "",
+    updatedAt: override.updated_at,
+  };
+}
+
 function publicUser(user) {
   return {
     id: user.id,
@@ -640,9 +743,9 @@ function buildQuoteHtml(order) {
 async function loadFileStore() {
   try {
     const raw = await fs.readFile(DATA_FILE, "utf8");
-    return JSON.parse(raw);
+    return normalizeFileStore(JSON.parse(raw));
   } catch {
-    const store = { users: [], orders: [], events: [], nextUserId: 1, nextOrderId: 1, nextEventId: 1 };
+    const store = normalizeFileStore({});
     await saveFileStore(store);
     return store;
   }
@@ -653,12 +756,34 @@ async function saveFileStore(store) {
   await fs.writeFile(DATA_FILE, JSON.stringify(store, null, 2));
 }
 
+function normalizeFileStore(store) {
+  return {
+    users: Array.isArray(store.users) ? store.users : [],
+    orders: Array.isArray(store.orders) ? store.orders : [],
+    events: Array.isArray(store.events) ? store.events : [],
+    productOverrides: Array.isArray(store.productOverrides) ? store.productOverrides : [],
+    nextUserId: Number(store.nextUserId || 1),
+    nextOrderId: Number(store.nextOrderId || 1),
+    nextEventId: Number(store.nextEventId || 1),
+  };
+}
+
 function base64url(value) {
   return Buffer.from(value).toString("base64url");
 }
 
 function cleanText(value) {
   return String(value ?? "").trim();
+}
+
+function cleanImageUrl(value) {
+  const text = cleanText(value);
+  if (!text) return "";
+  const allowed = /^https?:\/\//i.test(text)
+    || /^data:image\/(png|jpe?g|webp);base64,/i.test(text)
+    || text.startsWith("./fotos/");
+  if (!allowed) throw new Error("invalid image url");
+  return text.slice(0, 2_500_000);
 }
 
 function numberOrZero(value) {

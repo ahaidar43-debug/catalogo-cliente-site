@@ -31,6 +31,11 @@ const state = {
   visible: 72,
   currentOrderCode: "",
   activeSellerOrderCode: "",
+  adminView: new URLSearchParams(window.location.search).has("catalogo") ? "catalog" : "orders",
+  adminCatalogQuery: "",
+  adminCatalogStatus: "all",
+  adminCatalogVisible: 60,
+  catalogOverrides: new Map(),
   pendingSellerLink: null,
   sellerEvents: [],
   sellerUsers: [],
@@ -91,16 +96,20 @@ const refs = {
   toast: document.querySelector("#toast"),
 };
 
-const activeProducts = DATA.products.filter((product) => product.active);
-const productsById = new Map(DATA.products.map((product) => [product.id, product]));
-const categoryCounts = activeProducts.reduce((map, product) => {
-  map.set(product.type, (map.get(product.type) ?? 0) + 1);
-  return map;
-}, new Map());
+DATA.products.forEach((product) => {
+  product.baseActive = Boolean(product.active);
+  product.baseImageUrl = product.imageUrl || "";
+});
+
+let activeProducts = [];
+let productsById = new Map();
+let categoryCounts = new Map();
+rebuildCatalogIndexes();
 
 init();
 
 async function init() {
+  await loadCatalogOverrides();
   document.body.classList.toggle("owner-mode", ownerMode);
   refs.mainLayout.hidden = ownerMode;
   refs.sellerDashboard.hidden = !ownerMode;
@@ -322,6 +331,43 @@ function bindEvents() {
 
   refs.sellerDashboard.addEventListener("click", handleSellerDashboardClick);
   refs.sellerDashboard.addEventListener("submit", handleSellerDashboardSubmit);
+  refs.sellerDashboard.addEventListener("input", handleSellerDashboardInput);
+  refs.sellerDashboard.addEventListener("change", handleSellerDashboardChange);
+}
+
+async function loadCatalogOverrides() {
+  try {
+    const response = await apiRequest("/api/catalog-overrides");
+    applyCatalogOverrides(response.overrides || []);
+    rebuildCatalogIndexes();
+  } catch {
+    rebuildCatalogIndexes();
+  }
+}
+
+function applyCatalogOverrides(overrides) {
+  (overrides || []).forEach((override) => {
+    if (override?.productId) state.catalogOverrides.set(override.productId, override);
+  });
+
+  DATA.products.forEach((product) => {
+    product.active = product.baseActive;
+    product.imageUrl = product.baseImageUrl || "";
+
+    const override = state.catalogOverrides.get(product.id);
+    if (!override) return;
+    if (typeof override.active === "boolean") product.active = override.active;
+    if (typeof override.imageUrl === "string") product.imageUrl = override.imageUrl;
+  });
+}
+
+function rebuildCatalogIndexes() {
+  activeProducts = DATA.products.filter((product) => product.active);
+  productsById = new Map(DATA.products.map((product) => [product.id, product]));
+  categoryCounts = activeProducts.reduce((map, product) => {
+    map.set(product.type, (map.get(product.type) ?? 0) + 1);
+    return map;
+  }, new Map());
 }
 
 function getFilteredProducts() {
@@ -554,7 +600,7 @@ function getCartItems() {
   return Object.entries(state.cart)
     .map(([id, qty]) => {
       const product = productsById.get(id);
-      if (!product || !qty) return null;
+      if (!product || !product.active || !qty) return null;
       const tier = getPriceTier(product, qty);
       const unitPrice = tier?.price ?? product.price ?? 0;
       return {
@@ -977,6 +1023,40 @@ async function handleSellerDashboardClick(event) {
   const button = event.target.closest("button");
   if (!button) return;
 
+  if (button.dataset.adminView) {
+    state.adminView = button.dataset.adminView;
+    state.adminCatalogVisible = 60;
+    await renderSellerDashboard(state.activeSellerOrderCode);
+    return;
+  }
+
+  if (button.dataset.loadAdminProducts) {
+    state.adminCatalogVisible += 60;
+    updateAdminCatalogList();
+    return;
+  }
+
+  if (button.dataset.adminToggleProduct) {
+    await saveProductOverride(button.dataset.adminToggleProduct, {
+      active: button.dataset.active === "true",
+    });
+    return;
+  }
+
+  if (button.dataset.adminSavePhoto) {
+    const card = button.closest("[data-admin-product-card]");
+    const input = card?.querySelector("[data-admin-photo-url]");
+    await saveProductOverride(button.dataset.adminSavePhoto, {
+      imageUrl: input?.value || "",
+    });
+    return;
+  }
+
+  if (button.dataset.adminClearPhoto) {
+    await saveProductOverride(button.dataset.adminClearPhoto, { imageUrl: "" });
+    return;
+  }
+
   if (button.dataset.logout) {
     clearAuth();
     await renderSellerDashboard();
@@ -984,6 +1064,7 @@ async function handleSellerDashboardClick(event) {
   }
 
   if (button.dataset.viewSellerOrder) {
+    state.adminView = "orders";
     await renderSellerDashboard(button.dataset.viewSellerOrder);
     return;
   }
@@ -1003,6 +1084,34 @@ async function handleSellerDashboardClick(event) {
       () => showToast("Mensagem do pedido copiada"),
       () => showToast("Nao foi possivel copiar"),
     );
+  }
+}
+
+function handleSellerDashboardInput(event) {
+  const searchInput = event.target.closest("[data-admin-product-search]");
+  if (!searchInput) return;
+  state.adminCatalogQuery = searchInput.value;
+  state.adminCatalogVisible = 60;
+  updateAdminCatalogList();
+}
+
+async function handleSellerDashboardChange(event) {
+  const statusSelect = event.target.closest("[data-admin-product-status]");
+  if (statusSelect) {
+    state.adminCatalogStatus = statusSelect.value;
+    state.adminCatalogVisible = 60;
+    updateAdminCatalogList();
+    return;
+  }
+
+  const fileInput = event.target.closest("[data-admin-photo-file]");
+  if (fileInput?.files?.[0]) {
+    try {
+      const imageUrl = await resizeImageFile(fileInput.files[0]);
+      await saveProductOverride(fileInput.dataset.adminPhotoFile, { imageUrl });
+    } catch (error) {
+      showToast(error.message);
+    }
   }
 }
 
@@ -1054,7 +1163,8 @@ async function renderSellerDashboard(preferredCode = "") {
   try {
     const response = await apiRequest("/api/orders");
     orders = response.orders || [];
-    const selectedCode = preferredCode || state.activeSellerOrderCode || orders[0]?.code || "";
+    const adminCatalogMode = state.auth.user?.role === "admin" && state.adminView === "catalog";
+    const selectedCode = adminCatalogMode ? "" : preferredCode || state.activeSellerOrderCode || orders[0]?.code || "";
     selectedOrder = selectedCode ? await fetchSellerOrder(selectedCode) : null;
     state.activeSellerOrderCode = selectedOrder?.code || "";
 
@@ -1068,6 +1178,7 @@ async function renderSellerDashboard(preferredCode = "") {
     return;
   }
 
+  const adminCatalogMode = state.auth.user?.role === "admin" && state.adminView === "catalog";
   refs.sellerOrders.innerHTML = orders.length
     ? `${renderAdminPanel()}${orders.map((order) => renderSellerOrderCard(order, state.activeSellerOrderCode)).join("")}`
     : `
@@ -1080,12 +1191,16 @@ async function renderSellerDashboard(preferredCode = "") {
 
   refs.sellerDetail.innerHTML = selectedOrder
     ? renderSellerOrderDetail(selectedOrder)
+    : adminCatalogMode
+      ? renderAdminCatalog()
     : `
         <div class="seller-detail-card seller-empty">
           <strong>Aguardando pedido</strong>
           <span>Ao acessar pelo link do WhatsApp, a vendedora cai direto no pedido com itens, total e botao de Excel.</span>
         </div>
       `;
+
+  if (adminCatalogMode) updateAdminCatalogList();
 }
 
 function renderSellerLogin(preferredCode = "", errorMessage = "") {
@@ -1111,11 +1226,17 @@ function renderSellerLogin(preferredCode = "", errorMessage = "") {
 
 function renderAdminPanel() {
   if (state.auth?.user?.role !== "admin") return "";
+  const ordersActive = state.adminView !== "catalog" ? " is-active" : "";
+  const catalogActive = state.adminView === "catalog" ? " is-active" : "";
   return `
     <section class="seller-admin-panel">
       <div class="seller-admin-top">
         <strong>Administrador</strong>
         <button class="text-button" type="button" data-logout="true">Sair</button>
+      </div>
+      <div class="seller-admin-tabs">
+        <button class="primary-outline${ordersActive}" type="button" data-admin-view="orders">Pedidos</button>
+        <button class="primary-outline${catalogActive}" type="button" data-admin-view="catalog">Catalogo</button>
       </div>
       <form class="seller-user-form" data-create-user-form>
         <input name="name" type="text" placeholder="Nome" required />
@@ -1132,6 +1253,162 @@ function renderAdminPanel() {
       </div>
     </section>
   `;
+}
+
+function renderAdminCatalog() {
+  const activeCount = DATA.products.filter((product) => product.active).length;
+  return `
+    <article class="seller-detail-card admin-catalog-panel">
+      <div class="seller-detail-top">
+        <div>
+          <span>Catalogo</span>
+          <h3>Itens e fotos</h3>
+          <small>${activeCount} ativos de ${DATA.products.length} produtos</small>
+        </div>
+        <strong>${DATA.products.length}</strong>
+      </div>
+
+      <div class="admin-catalog-controls">
+        <label>Buscar produto
+          <input data-admin-product-search type="search" value="${escapeHtml(state.adminCatalogQuery)}" placeholder="Nome, codigo, marca ou categoria" />
+        </label>
+        <label>Status
+          <select data-admin-product-status>
+            <option value="all" ${state.adminCatalogStatus === "all" ? "selected" : ""}>Todos</option>
+            <option value="active" ${state.adminCatalogStatus === "active" ? "selected" : ""}>Ativos</option>
+            <option value="inactive" ${state.adminCatalogStatus === "inactive" ? "selected" : ""}>Inativos</option>
+            <option value="with-photo" ${state.adminCatalogStatus === "with-photo" ? "selected" : ""}>Com foto</option>
+            <option value="without-photo" ${state.adminCatalogStatus === "without-photo" ? "selected" : ""}>Sem foto</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="admin-product-summary" data-admin-product-summary></div>
+      <div class="admin-product-list" data-admin-product-results></div>
+    </article>
+  `;
+}
+
+function updateAdminCatalogList() {
+  const list = refs.sellerDetail.querySelector("[data-admin-product-results]");
+  const summary = refs.sellerDetail.querySelector("[data-admin-product-summary]");
+  if (!list || !summary) return;
+
+  const products = getAdminProducts();
+  const visible = products.slice(0, state.adminCatalogVisible);
+  summary.innerHTML = `
+    <strong>${products.length} produto${products.length === 1 ? "" : "s"} encontrado${products.length === 1 ? "" : "s"}</strong>
+    <span>${DATA.products.filter((product) => product.active).length} ativos no catalogo do cliente</span>
+  `;
+  list.innerHTML = visible.length
+    ? `
+        ${visible.map(renderAdminProductCard).join("")}
+        ${
+          products.length > visible.length
+            ? `<button class="primary-outline admin-load-more" type="button" data-load-admin-products="true">Carregar mais</button>`
+            : ""
+        }
+      `
+    : `
+        <div class="seller-empty">
+          <strong>Nenhum produto encontrado</strong>
+          <span>Tente buscar por outro nome, codigo ou categoria.</span>
+        </div>
+      `;
+}
+
+function getAdminProducts() {
+  const queryParts = normalize(state.adminCatalogQuery).split(/\s+/).filter(Boolean);
+  return DATA.products.filter((product) => {
+    const hasPhoto = Boolean(getProductPhotoUrl(product));
+    if (state.adminCatalogStatus === "active" && !product.active) return false;
+    if (state.adminCatalogStatus === "inactive" && product.active) return false;
+    if (state.adminCatalogStatus === "with-photo" && !hasPhoto) return false;
+    if (state.adminCatalogStatus === "without-photo" && hasPhoto) return false;
+    if (!queryParts.length) return true;
+
+    const haystack = normalize(`${product.id} ${product.name} ${product.brand} ${product.type} ${product.section}`);
+    return queryParts.every((part) => haystack.includes(part));
+  });
+}
+
+function renderAdminProductCard(product) {
+  const photoUrl = getProductPhotoUrl(product);
+  const nextActive = !product.active;
+  return `
+    <article class="admin-product-card" data-admin-product-card="${escapeHtml(product.id)}">
+      <div class="admin-product-preview${photoUrl ? " has-photo" : ""}">
+        ${
+          photoUrl
+            ? `<img src="${escapeHtml(photoUrl)}" alt="${escapeHtml(product.name)}" loading="lazy" />`
+            : `<span>${escapeHtml(symbolFor(product.type))}</span>`
+        }
+      </div>
+      <div class="admin-product-info">
+        <div>
+          <strong>${escapeHtml(product.name)}</strong>
+          <small>${escapeHtml(product.id)} - ${escapeHtml(product.type)} - ${escapeHtml(product.brand || "GERAL")}</small>
+        </div>
+        <span class="admin-status ${product.active ? "is-active" : "is-inactive"}">
+          ${product.active ? "Ativo no catalogo" : "Inativo"}
+        </span>
+      </div>
+      <div class="admin-product-actions">
+        <button class="${product.active ? "primary-outline" : "primary-button"}" type="button" data-admin-toggle-product="${escapeHtml(product.id)}" data-active="${String(nextActive)}">
+          ${product.active ? "Desativar" : "Ativar"}
+        </button>
+        <label class="admin-file-button">
+          Enviar foto
+          <input type="file" accept="image/*" data-admin-photo-file="${escapeHtml(product.id)}" />
+        </label>
+        <input data-admin-photo-url="${escapeHtml(product.id)}" type="url" value="${escapeHtml(product.imageUrl || "")}" placeholder="Link da foto" />
+        <button class="primary-outline" type="button" data-admin-save-photo="${escapeHtml(product.id)}">Salvar foto</button>
+        <button class="text-button" type="button" data-admin-clear-photo="${escapeHtml(product.id)}">Remover foto</button>
+      </div>
+    </article>
+  `;
+}
+
+async function saveProductOverride(productId, patch) {
+  try {
+    const response = await apiRequest(`/api/products/${encodeURIComponent(productId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+    applyCatalogOverrides([response.override]);
+    rebuildCatalogIndexes();
+    updateAdminCatalogList();
+    showToast("Catalogo atualizado");
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+function resizeImageFile(file) {
+  if (!file.type.startsWith("image/")) {
+    return Promise.reject(new Error("Escolha um arquivo de imagem"));
+  }
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Nao foi possivel ler a foto"));
+    reader.onload = () => {
+      const image = new Image();
+      image.onerror = () => reject(new Error("Nao foi possivel abrir a foto"));
+      image.onload = () => {
+        const maxSide = 900;
+        const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(image.width * scale));
+        canvas.height = Math.max(1, Math.round(image.height * scale));
+        const context = canvas.getContext("2d");
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", 0.78));
+      };
+      image.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 function renderSellerOrderCard(order, selectedCode) {
