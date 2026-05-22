@@ -14,6 +14,9 @@ const SESSION_SECRET = process.env.SESSION_SECRET || "local-dev-secret-change-on
 const TOKEN_DAYS = Number(process.env.TOKEN_DAYS || 7);
 const DATA_FILE = process.env.LOCAL_DATA_FILE || path.join(__dirname, "data", "local-db.json");
 const hasPostgres = Boolean(process.env.DATABASE_URL);
+const ORDER_STATUSES = ["novo", "visualizado", "baixado", "cobrado", "pago", "cancelado"];
+const DEFAULT_ORDER_STATUS = ORDER_STATUSES[0];
+const CRC32_TABLE = buildCrc32Table();
 const fallbackPasswordHashes = {
   admin: "$2a$10$RKrwqOK9KXX0JNJzjSUkuuftpxRIAx5S29SjpKrkOnVhIVsSbHkvS",
   vendedora: "$2a$10$Nl3vKELNCuwmNkrbZku.AuW7OfYXr0BZ7Rij2A4ocGL7WOcTOmTxq",
@@ -125,13 +128,20 @@ app.post("/api/orders", async (req, res) => {
   res.status(201).json({ order: orderForApi(order), sellerUrl: order.seller_url });
 });
 
-app.get("/api/orders", requireAuth(["admin", "seller"]), async (_req, res) => {
-  const orders = await listOrders();
-  res.json({ orders: orders.map(orderSummaryForApi) });
+app.get("/api/orders", requireAuth(["admin", "seller"]), async (req, res) => {
+  const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 50));
+  const query = cleanText(req.query.q).slice(0, 120);
+  const status = cleanOrderStatus(req.query.status, "");
+  const result = await listOrders({ page, limit, query, status });
+  res.json({
+    ...result,
+    orders: result.orders.map(orderSummaryForApi),
+  });
 });
 
 app.get("/api/orders/:code", requireAuth(["admin", "seller"]), async (req, res) => {
-  const order = await findOrderByCode(req.params.code);
+  let order = await findOrderByCode(req.params.code);
   if (!order) {
     res.status(404).json({ error: "Pedido nao encontrado" });
     return;
@@ -140,9 +150,29 @@ app.get("/api/orders/:code", requireAuth(["admin", "seller"]), async (req, res) 
   await logOrderEvent(order.id, req.user.id, "viewed", {
     via: req.query.token ? "whatsapp-link" : "dashboard",
   });
+  if ((order.status || DEFAULT_ORDER_STATUS) === "novo") {
+    order = await updateOrderStatus(order.id, "visualizado", req.user.id, { automatic: true }) || order;
+  }
 
   const events = req.user.role === "admin" ? await listOrderEvents(order.id) : [];
   res.json({ order: orderForApi(order), events });
+});
+
+app.patch("/api/orders/:code/status", requireAuth(["admin", "seller"]), async (req, res) => {
+  const status = cleanOrderStatus(req.body?.status);
+  if (!status) {
+    res.status(400).json({ error: "Status do pedido invalido" });
+    return;
+  }
+
+  const order = await findOrderByCode(req.params.code);
+  if (!order) {
+    res.status(404).json({ error: "Pedido nao encontrado" });
+    return;
+  }
+
+  const updatedOrder = await updateOrderStatus(order.id, status, req.user.id, { manual: true });
+  res.json({ order: orderForApi(updatedOrder || order) });
 });
 
 app.get("/api/orders/:code/events", requireAuth(["admin"]), async (req, res) => {
@@ -155,18 +185,21 @@ app.get("/api/orders/:code/events", requireAuth(["admin"]), async (req, res) => 
 });
 
 app.get("/api/orders/:code/download", requireAuth(["admin", "seller"]), async (req, res) => {
-  const order = await findOrderByCode(req.params.code);
+  let order = await findOrderByCode(req.params.code);
   if (!order) {
     res.status(404).json({ error: "Pedido nao encontrado" });
     return;
   }
 
-  await logOrderEvent(order.id, req.user.id, "downloaded", { format: "xls" });
-  const html = buildQuoteHtml(order);
-  const fileName = `${safeFileName(order.code)}-${safeFileName(order.customer_name || "CLIENTE")}.xls`;
-  res.setHeader("Content-Type", "application/vnd.ms-excel; charset=utf-8");
+  await logOrderEvent(order.id, req.user.id, "downloaded", { format: "xlsx" });
+  if (["novo", "visualizado"].includes(order.status || DEFAULT_ORDER_STATUS)) {
+    order = await updateOrderStatus(order.id, "baixado", req.user.id, { automatic: true, format: "xlsx" }) || order;
+  }
+  const workbook = buildQuoteWorkbook(order);
+  const fileName = `${safeFileName(order.code)}-${safeFileName(order.customer_name || "CLIENTE")}.xlsx`;
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
-  res.send(`\ufeff${html}`);
+  res.send(workbook);
 });
 
 app.use(express.static(__dirname));
@@ -205,6 +238,7 @@ async function ensureStore() {
         delivery_fee NUMERIC(12,2) NOT NULL DEFAULT 0,
         total NUMERIC(12,2) NOT NULL DEFAULT 0,
         item_count INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'novo',
         text TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -227,6 +261,13 @@ async function ensureStore() {
         updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+    `);
+    await pool.query(`
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'novo';
+      CREATE INDEX IF NOT EXISTS orders_created_at_idx ON orders (created_at DESC);
+      CREATE INDEX IF NOT EXISTS orders_status_created_at_idx ON orders (status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS orders_customer_name_idx ON orders (LOWER(customer_name));
+      CREATE INDEX IF NOT EXISTS orders_customer_phone_idx ON orders (customer_phone);
     `);
   } else {
     await loadFileStore();
@@ -456,6 +497,7 @@ async function upsertOrder(input, baseUrl) {
     total: input.total,
     item_count: input.itemCount,
     text: input.text,
+    status: existing?.status || DEFAULT_ORDER_STATUS,
     created_at: existing?.created_at || new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
@@ -464,12 +506,46 @@ async function upsertOrder(input, baseUrl) {
   return order;
 }
 
-async function listOrders() {
+async function listOrders({ page = 1, limit = 50, query = "", status = "" } = {}) {
+  const offset = (page - 1) * limit;
   if (hasPostgres) {
-    const result = await pool.query("SELECT * FROM orders ORDER BY created_at DESC");
-    return result.rows;
+    const filters = [];
+    const values = [];
+
+    if (query) {
+      values.push(`%${query}%`);
+      const index = values.length;
+      filters.push(`(code ILIKE $${index} OR customer_name ILIKE $${index} OR customer_phone ILIKE $${index})`);
+    }
+
+    if (status) {
+      values.push(status);
+      filters.push(`status = $${values.length}`);
+    }
+
+    const whereSql = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+    const countResult = await pool.query(`SELECT COUNT(*)::int AS total FROM orders ${whereSql}`, values);
+    const total = Number(countResult.rows[0]?.total || 0);
+    const pageValues = [...values, limit, offset];
+    const result = await pool.query(
+      `SELECT * FROM orders
+       ${whereSql}
+       ORDER BY created_at DESC
+       LIMIT $${pageValues.length - 1}
+       OFFSET $${pageValues.length}`,
+      pageValues,
+    );
+    return paginatedOrders(result.rows, { page, limit, total });
   }
-  return (await loadFileStore()).orders.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+  let orders = (await loadFileStore()).orders;
+  if (query) {
+    const needle = normalizeSearch(query);
+    orders = orders.filter((order) => normalizeSearch(`${order.code} ${order.customer_name} ${order.customer_phone}`).includes(needle));
+  }
+  if (status) orders = orders.filter((order) => (order.status || DEFAULT_ORDER_STATUS) === status);
+  orders = orders.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  return paginatedOrders(orders.slice(offset, offset + limit), { page, limit, total: orders.length });
 }
 
 async function findOrderByCode(code) {
@@ -499,6 +575,55 @@ async function logOrderEvent(orderId, userId, eventType, details = {}) {
     created_at: new Date().toISOString(),
   });
   await saveFileStore(store);
+}
+
+async function updateOrderStatus(orderId, status, userId, details = {}) {
+  const cleanStatus = cleanOrderStatus(status);
+  if (!cleanStatus) return null;
+  const existing = await findOrderById(orderId);
+  if (!existing) return null;
+  const previousStatus = existing.status || DEFAULT_ORDER_STATUS;
+
+  if (hasPostgres) {
+    const result = await pool.query(
+      `UPDATE orders
+       SET status = $1, updated_at = NOW()
+       WHERE id = $2
+       RETURNING *`,
+      [cleanStatus, orderId],
+    );
+    if (previousStatus !== cleanStatus) {
+      await logOrderEvent(orderId, userId, "status_changed", {
+        ...details,
+        from: previousStatus,
+        to: cleanStatus,
+      });
+    }
+    return result.rows[0] || null;
+  }
+
+  const store = await loadFileStore();
+  const order = store.orders.find((item) => Number(item.id) === Number(orderId));
+  if (!order) return null;
+  order.status = cleanStatus;
+  order.updated_at = new Date().toISOString();
+  await saveFileStore(store);
+  if (previousStatus !== cleanStatus) {
+    await logOrderEvent(orderId, userId, "status_changed", {
+      ...details,
+      from: previousStatus,
+      to: cleanStatus,
+    });
+  }
+  return order;
+}
+
+async function findOrderById(id) {
+  if (hasPostgres) {
+    const result = await pool.query("SELECT * FROM orders WHERE id = $1", [id]);
+    return result.rows[0] || null;
+  }
+  return (await loadFileStore()).orders.find((order) => Number(order.id) === Number(id)) || null;
 }
 
 async function listOrderEvents(orderId) {
@@ -610,6 +735,7 @@ function orderForApi(order) {
   return {
     id: order.id,
     code: order.code,
+    status: order.status || DEFAULT_ORDER_STATUS,
     sellerUrl: order.seller_url,
     customer: order.customer_name,
     checkout: parseJsonValue(order.checkout),
@@ -628,6 +754,7 @@ function orderForApi(order) {
 function orderSummaryForApi(order) {
   return {
     code: order.code,
+    status: order.status || DEFAULT_ORDER_STATUS,
     customer: order.customer_name,
     phone: order.customer_phone,
     total: Number(order.total || 0),
@@ -676,68 +803,288 @@ function publicBaseUrl(req) {
   return process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
 }
 
-function buildQuoteHtml(order) {
-  const checkout = parseJsonValue(order.checkout);
-  const items = parseJsonValue(order.items);
-  const rows = items
-    .map(
-      (item) => `
-        <tr>
-          <td>${escapeHtml(`${item.qty}x ${item.name}`)}</td>
-          <td class="money">${Number(item.unitPrice || 0).toFixed(2)}</td>
-          <td class="money">${Number(item.lineTotal || 0).toFixed(2)}</td>
-        </tr>
-      `,
-    )
-    .join("");
+function buildQuoteWorkbook(order) {
+  const entries = [
+    { name: "[Content_Types].xml", data: xlsxContentTypesXml() },
+    { name: "_rels/.rels", data: xlsxRootRelsXml() },
+    { name: "xl/workbook.xml", data: xlsxWorkbookXml() },
+    { name: "xl/_rels/workbook.xml.rels", data: xlsxWorkbookRelsXml() },
+    { name: "xl/styles.xml", data: xlsxStylesXml() },
+    { name: "xl/worksheets/sheet1.xml", data: buildQuoteWorksheetXml(order) },
+  ];
+  return createZip(entries);
+}
 
-  const deliveryRow = Number(order.delivery_fee || 0)
-    ? `
-        <tr>
-          <td>Taxa de entrega</td>
-          <td></td>
-          <td class="money">${Number(order.delivery_fee || 0).toFixed(2)}</td>
-        </tr>
-      `
-    : "";
+function buildQuoteWorksheetXml(order) {
+  const checkout = parseJsonValue(order.checkout);
+  const parsedItems = parseJsonValue(order.items);
+  const items = Array.isArray(parsedItems) ? parsedItems : [];
+  const modeLabel = checkout.mode === "entrega" ? "Entrega" : "Retirada";
+  const rows = [
+    { merge: true, cells: [{ value: `Cliente: ${order.customer_name || checkout.name || "Cliente"}`, style: 1 }] },
+    { merge: true, cells: [{ value: `${order.code} | Telefone: ${checkout.phone || "Nao informado"}`, style: 1 }] },
+    { merge: true, cells: [{ value: `Tipo: ${modeLabel} | Pagamento: ${checkout.payment || "Nao informado"}` }] },
+  ];
+
+  if (checkout.address) rows.push({ merge: true, cells: [{ value: `Endereco: ${checkout.address}` }] });
+  if (checkout.notes) rows.push({ merge: true, cells: [{ value: `Observacao: ${checkout.notes}` }] });
+
+  rows.push(
+    { cells: [] },
+    {
+      cells: [
+        { value: "Item", style: 2 },
+        { value: "Valor unitario", style: 2 },
+        { value: "Valor total do item", style: 2 },
+      ],
+    },
+  );
+
+  items.forEach((item) => {
+    rows.push({
+      cells: [
+        { value: `${item.qty}x ${item.name}`, style: 4 },
+        { value: Number(item.unitPrice || 0), type: "number", style: 3 },
+        { value: Number(item.lineTotal || 0), type: "number", style: 3 },
+      ],
+    });
+  });
+
+  if (Number(order.delivery_fee || 0)) {
+    rows.push({
+      cells: [
+        { value: "Taxa de entrega", style: 4 },
+        { value: "", style: 4 },
+        { value: Number(order.delivery_fee || 0), type: "number", style: 3 },
+      ],
+    });
+  }
+
+  rows.push({
+    cells: [
+      { value: "Total do orcamento", style: 5 },
+      { value: "", style: 5 },
+      { value: Number(order.total || 0), type: "number", style: 6 },
+    ],
+  });
+
+  return buildWorksheetXml(rows);
+}
+
+function buildWorksheetXml(rows) {
+  const sheetRows = rows.map((row, index) => {
+    const rowNumber = index + 1;
+    const cells = (row.cells || []).map((cell, cellIndex) => buildCellXml(cell, cellIndex, rowNumber)).join("");
+    return `<row r="${rowNumber}">${cells}</row>`;
+  }).join("");
+  const merges = rows
+    .map((row, index) => row.merge ? `<mergeCell ref="A${index + 1}:C${index + 1}"/>` : "")
+    .filter(Boolean);
 
   return `
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <style>
-          table { border-collapse: collapse; font-family: Arial, sans-serif; font-size: 12pt; }
-          td, th { border: 1px solid #d9d9d9; padding: 8px 10px; }
-          .title td { border: 0; font-weight: 700; font-size: 14pt; }
-          .spacer td { border: 0; height: 14px; }
-          th { background: #f2f2f2; font-weight: 700; text-align: left; }
-          .money { mso-number-format: "R$ #,##0.00"; text-align: right; }
-          .total td { font-weight: 700; background: #f7f7f7; }
-          .item { width: 420px; }
-          .value { width: 150px; }
-        </style>
-      </head>
-      <body>
-        <table>
-          <tr class="title"><td colspan="3">Cliente: ${escapeHtml(order.customer_name)}</td></tr>
-          <tr class="title"><td colspan="3">${escapeHtml(order.code)} | Telefone: ${escapeHtml(checkout.phone || "Nao informado")}</td></tr>
-          <tr class="spacer"><td colspan="3"></td></tr>
-          <tr>
-            <th class="item">Item</th>
-            <th class="value">Valor unitario</th>
-            <th class="value">Valor total do item</th>
-          </tr>
-          ${rows}
-          ${deliveryRow}
-          <tr class="total">
-            <td>Total do orcamento</td>
-            <td></td>
-            <td class="money">${Number(order.total || 0).toFixed(2)}</td>
-          </tr>
-        </table>
-      </body>
-    </html>
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+      xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+      <dimension ref="A1:C${rows.length}"/>
+      <cols>
+        <col min="1" max="1" width="55" customWidth="1"/>
+        <col min="2" max="3" width="18" customWidth="1"/>
+      </cols>
+      <sheetData>${sheetRows}</sheetData>
+      ${merges.length ? `<mergeCells count="${merges.length}">${merges.join("")}</mergeCells>` : ""}
+    </worksheet>
   `;
+}
+
+function buildCellXml(cell, columnIndex, rowNumber) {
+  const ref = `${String.fromCharCode(65 + columnIndex)}${rowNumber}`;
+  const style = Number.isInteger(cell.style) ? ` s="${cell.style}"` : "";
+  if (cell.type === "number") {
+    const value = Number(cell.value);
+    return `<c r="${ref}"${style}><v>${Number.isFinite(value) ? value : 0}</v></c>`;
+  }
+  return `<c r="${ref}" t="inlineStr"${style}><is><t>${escapeXml(cell.value)}</t></is></c>`;
+}
+
+function xlsxContentTypesXml() {
+  return `
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+      <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+      <Default Extension="xml" ContentType="application/xml"/>
+      <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+      <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+      <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+    </Types>
+  `;
+}
+
+function xlsxRootRelsXml() {
+  return `
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+    </Relationships>
+  `;
+}
+
+function xlsxWorkbookXml() {
+  return `
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+      xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+      <sheets>
+        <sheet name="Orcamento" sheetId="1" r:id="rId1"/>
+      </sheets>
+    </workbook>
+  `;
+}
+
+function xlsxWorkbookRelsXml() {
+  return `
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+      <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+    </Relationships>
+  `;
+}
+
+function xlsxStylesXml() {
+  return `
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+      <numFmts count="1">
+        <numFmt numFmtId="164" formatCode="&quot;R$&quot; #,##0.00"/>
+      </numFmts>
+      <fonts count="2">
+        <font><sz val="11"/><name val="Calibri"/></font>
+        <font><b/><sz val="11"/><name val="Calibri"/></font>
+      </fonts>
+      <fills count="4">
+        <fill><patternFill patternType="none"/></fill>
+        <fill><patternFill patternType="gray125"/></fill>
+        <fill><patternFill patternType="solid"><fgColor rgb="FFEAF2ED"/><bgColor indexed="64"/></patternFill></fill>
+        <fill><patternFill patternType="solid"><fgColor rgb="FFF5F7F6"/><bgColor indexed="64"/></patternFill></fill>
+      </fills>
+      <borders count="2">
+        <border><left/><right/><top/><bottom/><diagonal/></border>
+        <border>
+          <left style="thin"><color rgb="FFD9D9D9"/></left>
+          <right style="thin"><color rgb="FFD9D9D9"/></right>
+          <top style="thin"><color rgb="FFD9D9D9"/></top>
+          <bottom style="thin"><color rgb="FFD9D9D9"/></bottom>
+          <diagonal/>
+        </border>
+      </borders>
+      <cellStyleXfs count="1">
+        <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+      </cellStyleXfs>
+      <cellXfs count="7">
+        <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+        <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+        <xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"/>
+        <xf numFmtId="164" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"/>
+        <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"/>
+        <xf numFmtId="0" fontId="1" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"/>
+        <xf numFmtId="164" fontId="1" fillId="3" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1"/>
+      </cellXfs>
+      <cellStyles count="1">
+        <cellStyle name="Normal" xfId="0" builtinId="0"/>
+      </cellStyles>
+    </styleSheet>
+  `;
+}
+
+function createZip(entries) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  const timestamp = dosDateTime(new Date());
+
+  entries.forEach((entry) => {
+    const data = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(String(entry.data).trim(), "utf8");
+    const name = Buffer.from(entry.name, "utf8");
+    const checksum = crc32(data);
+
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0x0800, 6);
+    localHeader.writeUInt16LE(0, 8);
+    localHeader.writeUInt16LE(timestamp.time, 10);
+    localHeader.writeUInt16LE(timestamp.date, 12);
+    localHeader.writeUInt32LE(checksum, 14);
+    localHeader.writeUInt32LE(data.length, 18);
+    localHeader.writeUInt32LE(data.length, 22);
+    localHeader.writeUInt16LE(name.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+    localParts.push(localHeader, name, data);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0x0800, 8);
+    centralHeader.writeUInt16LE(0, 10);
+    centralHeader.writeUInt16LE(timestamp.time, 12);
+    centralHeader.writeUInt16LE(timestamp.date, 14);
+    centralHeader.writeUInt32LE(checksum, 16);
+    centralHeader.writeUInt32LE(data.length, 20);
+    centralHeader.writeUInt32LE(data.length, 24);
+    centralHeader.writeUInt16LE(name.length, 28);
+    centralHeader.writeUInt16LE(0, 30);
+    centralHeader.writeUInt16LE(0, 32);
+    centralHeader.writeUInt16LE(0, 34);
+    centralHeader.writeUInt16LE(0, 36);
+    centralHeader.writeUInt32LE(0, 38);
+    centralHeader.writeUInt32LE(offset, 42);
+    centralParts.push(centralHeader, name);
+
+    offset += localHeader.length + name.length + data.length;
+  });
+
+  const body = Buffer.concat(localParts);
+  const centralDirectory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(body.length, 16);
+  end.writeUInt16LE(0, 20);
+
+  return Buffer.concat([body, centralDirectory, end]);
+}
+
+function dosDateTime(date) {
+  const year = Math.max(1980, date.getFullYear());
+  return {
+    time: (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2),
+    date: ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
+  };
+}
+
+function buildCrc32Table() {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < table.length; i += 1) {
+    let value = i;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    }
+    table[i] = value >>> 0;
+  }
+  return table;
+}
+
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc = CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
 }
 
 async function loadFileStore() {
@@ -757,9 +1104,13 @@ async function saveFileStore(store) {
 }
 
 function normalizeFileStore(store) {
+  const orders = Array.isArray(store.orders)
+    ? store.orders.map((order) => ({ ...order, status: order.status || DEFAULT_ORDER_STATUS }))
+    : [];
+
   return {
     users: Array.isArray(store.users) ? store.users : [],
-    orders: Array.isArray(store.orders) ? store.orders : [],
+    orders,
     events: Array.isArray(store.events) ? store.events : [],
     productOverrides: Array.isArray(store.productOverrides) ? store.productOverrides : [],
     nextUserId: Number(store.nextUserId || 1),
@@ -774,6 +1125,29 @@ function base64url(value) {
 
 function cleanText(value) {
   return String(value ?? "").trim();
+}
+
+function cleanOrderStatus(value, fallback = null) {
+  const status = cleanText(value).toLowerCase();
+  return ORDER_STATUSES.includes(status) ? status : fallback;
+}
+
+function paginatedOrders(orders, { page, limit, total }) {
+  return {
+    orders,
+    page,
+    limit,
+    total,
+    totalPages: Math.max(1, Math.ceil(total / limit)),
+  };
+}
+
+function normalizeSearch(value) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
 }
 
 function cleanImageUrl(value) {
@@ -812,7 +1186,7 @@ function safeFileName(value) {
     .slice(0, 80) || "orcamento";
 }
 
-function escapeHtml(value) {
+function escapeXml(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")

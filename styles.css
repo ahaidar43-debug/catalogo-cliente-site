@@ -136,6 +136,61 @@ body.owner-mode .topbar {
   gap: 10px;
 }
 
+.seller-list-tools {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fffdfa;
+}
+
+.seller-search-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.seller-list-tools label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.seller-search-form input,
+.seller-list-tools select,
+.seller-status-control select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: white;
+  padding: 10px 11px;
+  font-weight: 700;
+}
+
+.seller-list-summary,
+.seller-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.seller-pagination {
+  justify-content: center;
+  padding: 2px 0;
+}
+
+.seller-pagination span {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 .seller-order-card,
 .seller-detail-card,
 .seller-empty {
@@ -183,6 +238,48 @@ body.owner-mode .topbar {
   color: var(--muted);
 }
 
+.seller-status-pill {
+  width: max-content;
+  max-width: 100%;
+  padding: 4px 7px;
+  border-radius: var(--radius);
+  color: #5b4633;
+  background: #efe5d4;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.seller-status-pill.status-novo {
+  background: #e8f0ff;
+  color: #1f4b92;
+}
+
+.seller-status-pill.status-visualizado {
+  background: #ecfdf6;
+  color: #116a49;
+}
+
+.seller-status-pill.status-baixado {
+  background: #fff3d5;
+  color: #805300;
+}
+
+.seller-status-pill.status-cobrado {
+  background: #f1edff;
+  color: #5233a0;
+}
+
+.seller-status-pill.status-pago {
+  background: #e9f8d8;
+  color: #3a7013;
+}
+
+.seller-status-pill.status-cancelado {
+  background: #fff0f0;
+  color: #8d2626;
+}
+
 .seller-detail-card {
   display: grid;
   gap: 16px;
@@ -209,8 +306,19 @@ body.owner-mode .topbar {
 
 .seller-actions {
   display: flex;
+  align-items: end;
+  flex-wrap: wrap;
   gap: 10px;
   justify-content: flex-end;
+}
+
+.seller-status-control {
+  display: grid;
+  flex: 1 1 160px;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .seller-customer {
@@ -1465,6 +1573,20 @@ select:focus,
   .seller-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .seller-search-form {
+    grid-template-columns: 1fr;
+  }
+
+  .seller-list-summary,
+  .seller-pagination {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .seller-pagination button {
+    width: 100%;
   }
 
   .seller-customer {

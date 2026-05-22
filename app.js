@@ -25,6 +25,15 @@ const money = new Intl.NumberFormat("pt-BR", {
 });
 
 const PAYMENT_OPTIONS = ["Pix", "Dinheiro", "A combinar"];
+const ORDER_STATUSES = [
+  { value: "novo", label: "Novo" },
+  { value: "visualizado", label: "Visualizado" },
+  { value: "baixado", label: "Baixado" },
+  { value: "cobrado", label: "Cobrado" },
+  { value: "pago", label: "Pago" },
+  { value: "cancelado", label: "Cancelado" },
+];
+const ORDER_PAGE_SIZE = 50;
 
 const state = {
   query: "",
@@ -33,6 +42,10 @@ const state = {
   visible: 72,
   currentOrderCode: "",
   activeSellerOrderCode: "",
+  sellerOrderQuery: "",
+  sellerOrderStatus: "all",
+  sellerOrderPage: 1,
+  sellerPagination: { page: 1, limit: ORDER_PAGE_SIZE, total: 0, totalPages: 1 },
   adminView: new URLSearchParams(window.location.search).has("catalogo") ? "catalog" : "orders",
   adminCatalogQuery: "",
   adminCatalogStatus: "all",
@@ -1094,6 +1107,20 @@ async function handleSellerDashboardClick(event) {
     return;
   }
 
+  if (button.dataset.sellerPage) {
+    state.sellerOrderPage = Math.max(1, Number(button.dataset.sellerPage) || 1);
+    await renderSellerDashboard();
+    return;
+  }
+
+  if (button.dataset.clearSellerSearch) {
+    state.sellerOrderQuery = "";
+    state.sellerOrderStatus = "all";
+    state.sellerOrderPage = 1;
+    await renderSellerDashboard();
+    return;
+  }
+
   if (button.dataset.adminToggleProduct) {
     await saveProductOverride(button.dataset.adminToggleProduct, {
       active: button.dataset.active === "true",
@@ -1154,6 +1181,20 @@ function handleSellerDashboardInput(event) {
 }
 
 async function handleSellerDashboardChange(event) {
+  const orderStatusFilter = event.target.closest("[data-seller-status-filter]");
+  if (orderStatusFilter) {
+    state.sellerOrderStatus = orderStatusFilter.value;
+    state.sellerOrderPage = 1;
+    await renderSellerDashboard();
+    return;
+  }
+
+  const orderStatusSelect = event.target.closest("[data-order-status]");
+  if (orderStatusSelect) {
+    await updateSellerOrderStatus(orderStatusSelect.dataset.orderStatusCode, orderStatusSelect.value);
+    return;
+  }
+
   const statusSelect = event.target.closest("[data-admin-product-status]");
   if (statusSelect) {
     state.adminCatalogStatus = statusSelect.value;
@@ -1178,6 +1219,14 @@ async function handleSellerDashboardChange(event) {
 async function handleSellerDashboardSubmit(event) {
   event.preventDefault();
   const form = event.target;
+
+  if (form.matches("[data-seller-order-search-form]")) {
+    const formData = new FormData(form);
+    state.sellerOrderQuery = String(formData.get("query") || "").trim();
+    state.sellerOrderPage = 1;
+    await renderSellerDashboard();
+    return;
+  }
 
   if (form.matches("[data-login-form]")) {
     const formData = new FormData(form);
@@ -1221,8 +1270,15 @@ async function renderSellerDashboard(preferredCode = "") {
   let selectedOrder = null;
 
   try {
-    const response = await apiRequest("/api/orders");
+    const response = await apiRequest(`/api/orders?${sellerOrderQueryParams()}`);
     orders = response.orders || [];
+    state.sellerPagination = {
+      page: Number(response.page || state.sellerOrderPage || 1),
+      limit: Number(response.limit || ORDER_PAGE_SIZE),
+      total: Number(response.total || orders.length),
+      totalPages: Number(response.totalPages || 1),
+    };
+    state.sellerOrderPage = state.sellerPagination.page;
     const adminCatalogMode = state.auth.user?.role === "admin" && state.adminView === "catalog";
     const selectedCode = adminCatalogMode ? "" : preferredCode || state.activeSellerOrderCode || orders[0]?.code || "";
     selectedOrder = selectedCode ? await fetchSellerOrder(selectedCode) : null;
@@ -1239,12 +1295,27 @@ async function renderSellerDashboard(preferredCode = "") {
   }
 
   const adminCatalogMode = state.auth.user?.role === "admin" && state.adminView === "catalog";
+  const sellerList = `
+    ${renderAdminPanel()}
+    ${renderSellerOrderFilters()}
+    ${
+      orders.length
+        ? `${orders.map((order) => renderSellerOrderCard(order, state.activeSellerOrderCode)).join("")}${renderSellerPagination()}`
+        : `
+            <div class="seller-empty">
+              <strong>Nenhum pedido encontrado</strong>
+              <span>Use outro nome, telefone, codigo ou status.</span>
+            </div>
+          `
+    }
+  `;
   refs.sellerOrders.innerHTML = orders.length
-    ? `${renderAdminPanel()}${orders.map((order) => renderSellerOrderCard(order, state.activeSellerOrderCode)).join("")}`
+    ? sellerList
     : `
         ${renderAdminPanel()}
+        ${renderSellerOrderFilters()}
         <div class="seller-empty">
-          <strong>Nenhum pedido realizado aberto ainda</strong>
+          <strong>Nenhum pedido encontrado</strong>
           <span>Quando chegar um WhatsApp do cliente, clique no link da vendedora dentro da mensagem.</span>
         </div>
       `;
@@ -1281,6 +1352,54 @@ function renderSellerLogin(preferredCode = "", errorMessage = "") {
       </label>
       <button class="primary-button" type="submit">Entrar</button>
     </form>
+  `;
+}
+
+function sellerOrderQueryParams() {
+  const params = new URLSearchParams({
+    page: String(state.sellerOrderPage || 1),
+    limit: String(ORDER_PAGE_SIZE),
+  });
+  if (state.sellerOrderQuery.trim()) params.set("q", state.sellerOrderQuery.trim());
+  if (state.sellerOrderStatus !== "all") params.set("status", state.sellerOrderStatus);
+  return params.toString();
+}
+
+function renderSellerOrderFilters() {
+  const pagination = state.sellerPagination;
+  const start = pagination.total ? (pagination.page - 1) * pagination.limit + 1 : 0;
+  const end = Math.min(pagination.total, pagination.page * pagination.limit);
+  return `
+    <section class="seller-list-tools">
+      <form class="seller-search-form" data-seller-order-search-form>
+        <input name="query" type="search" value="${escapeHtml(state.sellerOrderQuery)}" placeholder="Buscar cliente, telefone ou pedido" />
+        <button class="primary-button" type="submit">Buscar</button>
+      </form>
+      <label>Status
+        <select data-seller-status-filter>
+          <option value="all" ${state.sellerOrderStatus === "all" ? "selected" : ""}>Todos</option>
+          ${ORDER_STATUSES.map((status) => `
+            <option value="${status.value}" ${state.sellerOrderStatus === status.value ? "selected" : ""}>${status.label}</option>
+          `).join("")}
+        </select>
+      </label>
+      <div class="seller-list-summary">
+        <span>${start}-${end} de ${pagination.total} pedidos</span>
+        ${(state.sellerOrderQuery || state.sellerOrderStatus !== "all") ? `<button class="text-button" type="button" data-clear-seller-search="true">Limpar</button>` : ""}
+      </div>
+    </section>
+  `;
+}
+
+function renderSellerPagination() {
+  const pagination = state.sellerPagination;
+  if (pagination.totalPages <= 1) return "";
+  return `
+    <nav class="seller-pagination" aria-label="Paginas de pedidos">
+      <button class="primary-outline" type="button" data-seller-page="${pagination.page - 1}" ${pagination.page <= 1 ? "disabled" : ""}>Anterior</button>
+      <span>Pagina ${pagination.page} de ${pagination.totalPages}</span>
+      <button class="primary-outline" type="button" data-seller-page="${pagination.page + 1}" ${pagination.page >= pagination.totalPages ? "disabled" : ""}>Proxima</button>
+    </nav>
   `;
 }
 
@@ -1607,6 +1726,7 @@ function renderSellerOrderCard(order, selectedCode) {
         <strong>${escapeHtml(order.code)}</strong>
         <span>${escapeHtml(orderCustomerName(order))}</span>
         <small>${escapeHtml(formatOrderDate(order.createdAt || order.date))} - ${money.format(Number(order.total || 0))}</small>
+        <em class="seller-status-pill status-${escapeHtml(order.status || "novo")}">${escapeHtml(orderStatusLabel(order.status))}</em>
       </button>
       <div>
         <button class="primary-outline" type="button" data-download-seller-order="${escapeHtml(order.code)}">Excel</button>
@@ -1630,6 +1750,11 @@ function renderSellerOrderDetail(order) {
       </div>
 
       <div class="seller-actions">
+        <label class="seller-status-control">Status
+          <select data-order-status data-order-status-code="${escapeHtml(order.code)}">
+            ${renderOrderStatusOptions(order.status)}
+          </select>
+        </label>
         <button class="primary-outline" type="button" data-copy-seller-order="${escapeHtml(order.code)}">Copiar mensagem</button>
         <button class="primary-button" type="button" data-download-seller-order="${escapeHtml(order.code)}">Baixar Excel</button>
       </div>
@@ -1663,6 +1788,29 @@ function renderSellerOrderDetail(order) {
   `;
 }
 
+function renderOrderStatusOptions(currentStatus = "novo") {
+  return ORDER_STATUSES.map((status) => `
+    <option value="${status.value}" ${status.value === (currentStatus || "novo") ? "selected" : ""}>${status.label}</option>
+  `).join("");
+}
+
+function orderStatusLabel(value = "novo") {
+  return ORDER_STATUSES.find((status) => status.value === value)?.label || "Novo";
+}
+
+async function updateSellerOrderStatus(code, status) {
+  try {
+    await apiRequest(`/api/orders/${encodeURIComponent(code)}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    });
+    showToast("Status atualizado");
+    await renderSellerDashboard(code);
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
 function renderSellerItem(item) {
   return `
     <div class="seller-item">
@@ -1692,7 +1840,7 @@ async function downloadSellerOrder(code) {
   const response = await apiRequest(`/api/orders/${encodeURIComponent(code)}/download`, { raw: true });
   const blob = await response.blob();
   const disposition = response.headers.get("content-disposition") || "";
-  const fileName = disposition.match(/filename="([^"]+)"/)?.[1] || `${safeFileName(code)}.xls`;
+  const fileName = disposition.match(/filename="([^"]+)"/)?.[1] || `${safeFileName(code)}.xlsx`;
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -1717,7 +1865,7 @@ function renderSellerEvents() {
           ? state.sellerEvents.map((event) => `
               <div>
                 <strong>${escapeHtml(eventLabel(event.type))}</strong>
-                <span>${escapeHtml(event.user?.name || "Sistema")} - ${escapeHtml(formatOrderDate(event.createdAt))}</span>
+                <span>${escapeHtml(event.user?.name || "Sistema")} - ${escapeHtml(formatOrderDate(event.createdAt))}${eventDetailText(event)}</span>
               </div>
             `).join("")
           : "<span>Nenhum historico ainda</span>"
@@ -1731,8 +1879,16 @@ function eventLabel(type) {
     created: "Pedido criado",
     viewed: "Pedido visualizado",
     downloaded: "Excel baixado",
+    status_changed: "Status alterado",
   };
   return labels[type] || type;
+}
+
+function eventDetailText(event) {
+  if (event.type !== "status_changed") return "";
+  const from = orderStatusLabel(event.details?.from);
+  const to = orderStatusLabel(event.details?.to);
+  return ` - ${from} para ${to}`;
 }
 
 function formatOrderDate(value) {
@@ -1775,19 +1931,17 @@ function downloadQuote(order) {
     return;
   }
 
-  const html = buildQuoteHtml(normalizedOrder);
-  const blob = new Blob(["\ufeff", html], {
-    type: "application/vnd.ms-excel;charset=utf-8",
-  });
+  const csv = buildQuoteCsv(normalizedOrder);
+  const blob = new Blob(["\ufeff", csv], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `${safeFileName(normalizedOrder.code)}-${safeFileName(normalizedOrder.customerName || "CLIENTE")}.xls`;
+  link.download = `${safeFileName(normalizedOrder.code)}-${safeFileName(normalizedOrder.customerName || "CLIENTE")}.csv`;
   document.body.appendChild(link);
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
-  showToast("Orcamento Excel gerado");
+  showToast("Orcamento gerado para abrir no celular");
 }
 
 function normalizeOrderForQuote(order) {
@@ -1806,6 +1960,7 @@ function normalizeOrderForQuote(order) {
     code: order.code || state.currentOrderCode || makeOrderCode(),
     customerName: order.checkout?.name || order.customer?.name || state.checkout.name || "Cliente",
     responsible: "Administrador",
+    checkout: order.checkout || state.checkout,
     items: currentItems,
     subtotal,
     deliveryFee,
@@ -1813,66 +1968,39 @@ function normalizeOrderForQuote(order) {
   };
 }
 
-function buildQuoteHtml(order) {
-  const rows = order.items
-    .map(
-      (item) => `
-        <tr>
-          <td>${escapeHtml(`${item.qty}x ${item.name}`)}</td>
-          <td class="money">${Number(item.unitPrice || 0).toFixed(2)}</td>
-          <td class="money">${Number(item.lineTotal || 0).toFixed(2)}</td>
-        </tr>
-      `,
-    )
-    .join("");
+function buildQuoteCsv(order) {
+  const checkout = order.checkout || {};
+  const modeLabel = checkout.mode === "entrega" ? "Entrega" : "Retirada";
+  const rows = [
+    [`Cliente: ${order.customerName}`],
+    [`${order.code} | Telefone: ${checkout.phone || "Nao informado"}`],
+    [`Tipo: ${modeLabel} | Pagamento: ${checkout.payment || "Nao informado"}`],
+  ];
 
-  const deliveryRow = order.deliveryFee
-    ? `
-        <tr>
-          <td>Taxa de entrega</td>
-          <td></td>
-          <td class="money">${Number(order.deliveryFee || 0).toFixed(2)}</td>
-        </tr>
-      `
-    : "";
+  if (checkout.address) rows.push([`Endereco: ${checkout.address}`]);
+  if (checkout.notes) rows.push([`Observacao: ${checkout.notes}`]);
 
-  return `
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <style>
-          table { border-collapse: collapse; font-family: Arial, sans-serif; font-size: 12pt; }
-          td, th { border: 1px solid #d9d9d9; padding: 8px 10px; }
-          .title td { border: 0; font-weight: 700; font-size: 14pt; }
-          .spacer td { border: 0; height: 14px; }
-          th { background: #f2f2f2; font-weight: 700; text-align: left; }
-          .money { mso-number-format: "R$ #,##0.00"; text-align: right; }
-          .total td { font-weight: 700; background: #f7f7f7; }
-          .item { width: 420px; }
-          .value { width: 150px; }
-        </style>
-      </head>
-      <body>
-        <table>
-          <tr class="title"><td colspan="3">Cliente: ${escapeHtml(order.customerName)}</td></tr>
-          <tr class="title"><td colspan="3">${escapeHtml(order.code)} | Responsavel: ${escapeHtml(order.responsible)}</td></tr>
-          <tr class="spacer"><td colspan="3"></td></tr>
-          <tr>
-            <th class="item">Item</th>
-            <th class="value">Valor unitario</th>
-            <th class="value">Valor total do item</th>
-          </tr>
-          ${rows}
-          ${deliveryRow}
-          <tr class="total">
-            <td>Total do orcamento</td>
-            <td></td>
-            <td class="money">${Number(order.total || 0).toFixed(2)}</td>
-          </tr>
-        </table>
-      </body>
-    </html>
-  `;
+  rows.push(
+    [],
+    ["Item", "Valor unitario", "Valor total do item"],
+    ...order.items.map((item) => [
+      `${item.qty}x ${item.name}`,
+      csvAmount(item.unitPrice),
+      csvAmount(item.lineTotal),
+    ]),
+  );
+
+  if (order.deliveryFee) rows.push(["Taxa de entrega", "", csvAmount(order.deliveryFee)]);
+  rows.push(["Total do orcamento", "", csvAmount(order.total)]);
+  return rows.map((row) => row.map(csvCell).join(";")).join("\r\n");
+}
+
+function csvAmount(value) {
+  return Number(value || 0).toFixed(2).replace(".", ",");
+}
+
+function csvCell(value) {
+  return `"${String(value ?? "").replace(/"/g, '""')}"`;
 }
 
 function safeFileName(value) {
