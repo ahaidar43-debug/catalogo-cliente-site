@@ -784,18 +784,24 @@ function hydrateCheckoutForms() {
     form.addEventListener("input", () => {
       readCheckoutForm(form);
       writeJson(KEYS.checkout, state.checkout);
+      syncCheckoutForms(form);
       updateTotalsOnly();
     });
     form.addEventListener("change", () => {
       readCheckoutForm(form);
       writeJson(KEYS.checkout, state.checkout);
-      renderCart();
+      syncCheckoutForms(form);
+      updateTotalsOnly();
     });
   });
 }
 
 function persistCheckoutFromDom() {
-  const form = document.querySelector("[data-checkout-form]");
+  const focusedForm = document.activeElement?.closest?.("[data-checkout-form]");
+  const mobileForm = refs.mobileCart.classList.contains("is-open")
+    ? refs.mobileCart.querySelector("[data-checkout-form]")
+    : null;
+  const form = focusedForm || mobileForm || refs.desktopCart.querySelector("[data-checkout-form]");
   if (form) {
     readCheckoutForm(form);
     writeJson(KEYS.checkout, state.checkout);
@@ -814,6 +820,20 @@ function readCheckoutForm(form) {
   };
 }
 
+function syncCheckoutForms(sourceForm) {
+  document.querySelectorAll("[data-checkout-form]").forEach((form) => {
+    if (form === sourceForm) return;
+    updateCheckoutFormValues(form);
+  });
+}
+
+function updateCheckoutFormValues(form) {
+  Object.entries(state.checkout).forEach(([name, value]) => {
+    const field = form.elements.namedItem(name);
+    if (field && field !== document.activeElement) field.value = value;
+  });
+}
+
 function updateTotalsOnly() {
   const items = getCartItems();
   const subtotal = items.reduce((sum, item) => sum + item.lineTotal, 0);
@@ -825,6 +845,7 @@ function updateTotalsOnly() {
     if (rows[1]) rows[1].textContent = money.format(deliveryFee);
     if (rows[2]) rows[2].textContent = money.format(total);
   });
+  renderMobileOrderBar();
 }
 
 function buildOrderText() {
