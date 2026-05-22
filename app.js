@@ -93,7 +93,27 @@ const refs = {
   historyButton: document.querySelector("#historyButton"),
   historyDialog: document.querySelector("#historyDialog"),
   historyList: document.querySelector("#historyList"),
+  photoCropDialog: document.querySelector("#photoCropDialog"),
+  photoCropForm: document.querySelector("#photoCropForm"),
+  photoCropCanvas: document.querySelector("#photoCropCanvas"),
+  photoCropZoom: document.querySelector("#photoCropZoom"),
   toast: document.querySelector("#toast"),
+};
+
+const photoCrop = {
+  image: null,
+  resolve: null,
+  reject: null,
+  done: false,
+  scale: 1,
+  minScale: 1,
+  offsetX: 0,
+  offsetY: 0,
+  dragging: false,
+  startX: 0,
+  startY: 0,
+  baseOffsetX: 0,
+  baseOffsetY: 0,
 };
 
 DATA.products.forEach((product) => {
@@ -333,6 +353,17 @@ function bindEvents() {
   refs.sellerDashboard.addEventListener("submit", handleSellerDashboardSubmit);
   refs.sellerDashboard.addEventListener("input", handleSellerDashboardInput);
   refs.sellerDashboard.addEventListener("change", handleSellerDashboardChange);
+
+  refs.photoCropForm.addEventListener("submit", handlePhotoCropSubmit);
+  refs.photoCropDialog.addEventListener("click", (event) => {
+    if (event.target.closest("[data-photo-crop-cancel]")) cancelPhotoCrop();
+  });
+  refs.photoCropDialog.addEventListener("close", handlePhotoCropClose);
+  refs.photoCropZoom.addEventListener("input", handlePhotoCropZoom);
+  refs.photoCropCanvas.addEventListener("pointerdown", startPhotoCropDrag);
+  refs.photoCropCanvas.addEventListener("pointermove", movePhotoCropDrag);
+  refs.photoCropCanvas.addEventListener("pointerup", endPhotoCropDrag);
+  refs.photoCropCanvas.addEventListener("pointercancel", endPhotoCropDrag);
 }
 
 async function loadCatalogOverrides() {
@@ -1107,10 +1138,12 @@ async function handleSellerDashboardChange(event) {
   const fileInput = event.target.closest("[data-admin-photo-file]");
   if (fileInput?.files?.[0]) {
     try {
-      const imageUrl = await resizeImageFile(fileInput.files[0]);
+      const imageUrl = await openPhotoCropper(fileInput.files[0]);
       await saveProductOverride(fileInput.dataset.adminPhotoFile, { imageUrl });
     } catch (error) {
-      showToast(error.message);
+      if (!error.cancelled) showToast(error.message);
+    } finally {
+      fileInput.value = "";
     }
   }
 }
@@ -1384,7 +1417,7 @@ async function saveProductOverride(productId, patch) {
   }
 }
 
-function resizeImageFile(file) {
+function openPhotoCropper(file) {
   if (!file.type.startsWith("image/")) {
     return Promise.reject(new Error("Escolha um arquivo de imagem"));
   }
@@ -1396,18 +1429,146 @@ function resizeImageFile(file) {
       const image = new Image();
       image.onerror = () => reject(new Error("Nao foi possivel abrir a foto"));
       image.onload = () => {
-        const maxSide = 900;
-        const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.max(1, Math.round(image.width * scale));
-        canvas.height = Math.max(1, Math.round(image.height * scale));
-        const context = canvas.getContext("2d");
-        context.drawImage(image, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL("image/jpeg", 0.78));
+        Object.assign(photoCrop, {
+          image,
+          resolve,
+          reject,
+          done: false,
+          dragging: false,
+        });
+        resetPhotoCropView();
+        refs.photoCropDialog.showModal();
+        drawPhotoCrop();
       };
       image.src = reader.result;
     };
     reader.readAsDataURL(file);
+  });
+}
+
+function resetPhotoCropView() {
+  const canvas = refs.photoCropCanvas;
+  const image = photoCrop.image;
+  const minScale = Math.max(canvas.width / image.width, canvas.height / image.height);
+  photoCrop.minScale = minScale;
+  photoCrop.scale = minScale;
+  photoCrop.offsetX = (canvas.width - image.width * minScale) / 2;
+  photoCrop.offsetY = (canvas.height - image.height * minScale) / 2;
+  refs.photoCropZoom.value = "1";
+}
+
+function handlePhotoCropZoom(event) {
+  if (!photoCrop.image) return;
+  const oldScale = photoCrop.scale;
+  const nextScale = photoCrop.minScale * Number(event.target.value || 1);
+  const canvas = refs.photoCropCanvas;
+  const centerX = canvas.width / 2;
+  const centerY = canvas.height / 2;
+
+  photoCrop.offsetX = centerX - ((centerX - photoCrop.offsetX) / oldScale) * nextScale;
+  photoCrop.offsetY = centerY - ((centerY - photoCrop.offsetY) / oldScale) * nextScale;
+  photoCrop.scale = nextScale;
+  clampPhotoCrop();
+  drawPhotoCrop();
+}
+
+function startPhotoCropDrag(event) {
+  if (!photoCrop.image) return;
+  photoCrop.dragging = true;
+  photoCrop.startX = event.clientX;
+  photoCrop.startY = event.clientY;
+  photoCrop.baseOffsetX = photoCrop.offsetX;
+  photoCrop.baseOffsetY = photoCrop.offsetY;
+  refs.photoCropCanvas.setPointerCapture(event.pointerId);
+}
+
+function movePhotoCropDrag(event) {
+  if (!photoCrop.dragging || !photoCrop.image) return;
+  const ratio = canvasPointRatio();
+  photoCrop.offsetX = photoCrop.baseOffsetX + (event.clientX - photoCrop.startX) * ratio;
+  photoCrop.offsetY = photoCrop.baseOffsetY + (event.clientY - photoCrop.startY) * ratio;
+  clampPhotoCrop();
+  drawPhotoCrop();
+}
+
+function endPhotoCropDrag(event) {
+  photoCrop.dragging = false;
+  if (event && refs.photoCropCanvas.hasPointerCapture(event.pointerId)) {
+    refs.photoCropCanvas.releasePointerCapture(event.pointerId);
+  }
+}
+
+function canvasPointRatio() {
+  const rect = refs.photoCropCanvas.getBoundingClientRect();
+  return rect.width ? refs.photoCropCanvas.width / rect.width : 1;
+}
+
+function clampPhotoCrop() {
+  const canvas = refs.photoCropCanvas;
+  const image = photoCrop.image;
+  const drawWidth = image.width * photoCrop.scale;
+  const drawHeight = image.height * photoCrop.scale;
+  photoCrop.offsetX = drawWidth <= canvas.width
+    ? (canvas.width - drawWidth) / 2
+    : Math.min(0, Math.max(canvas.width - drawWidth, photoCrop.offsetX));
+  photoCrop.offsetY = drawHeight <= canvas.height
+    ? (canvas.height - drawHeight) / 2
+    : Math.min(0, Math.max(canvas.height - drawHeight, photoCrop.offsetY));
+}
+
+function drawPhotoCrop() {
+  const canvas = refs.photoCropCanvas;
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fffdfa";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  if (!photoCrop.image) return;
+  context.drawImage(
+    photoCrop.image,
+    photoCrop.offsetX,
+    photoCrop.offsetY,
+    photoCrop.image.width * photoCrop.scale,
+    photoCrop.image.height * photoCrop.scale,
+  );
+}
+
+function handlePhotoCropSubmit(event) {
+  event.preventDefault();
+  if (!photoCrop.image) return;
+  photoCrop.done = true;
+  const dataUrl = refs.photoCropCanvas.toDataURL("image/jpeg", 0.82);
+  refs.photoCropDialog.close("save");
+  photoCrop.resolve?.(dataUrl);
+  clearPhotoCrop();
+}
+
+function cancelPhotoCrop() {
+  if (!photoCrop.image) {
+    refs.photoCropDialog.close("cancel");
+    return;
+  }
+  photoCrop.done = true;
+  const error = new Error("Recorte cancelado");
+  error.cancelled = true;
+  refs.photoCropDialog.close("cancel");
+  photoCrop.reject?.(error);
+  clearPhotoCrop();
+}
+
+function handlePhotoCropClose() {
+  if (!photoCrop.image || photoCrop.done) return;
+  const error = new Error("Recorte cancelado");
+  error.cancelled = true;
+  photoCrop.reject?.(error);
+  clearPhotoCrop();
+}
+
+function clearPhotoCrop() {
+  Object.assign(photoCrop, {
+    image: null,
+    resolve: null,
+    reject: null,
+    done: false,
+    dragging: false,
   });
 }
 

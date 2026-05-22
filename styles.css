@@ -1303,6 +1303,51 @@ select:focus,
   justify-content: end;
 }
 
+.photo-crop-modal {
+  width: min(560px, calc(100vw - 24px));
+}
+
+.photo-crop-card {
+  gap: 12px;
+}
+
+.photo-crop-stage {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+}
+
+.photo-crop-stage canvas {
+  width: min(100%, 440px);
+  aspect-ratio: 1;
+  cursor: grab;
+  touch-action: none;
+}
+
+.photo-crop-stage canvas:active {
+  cursor: grabbing;
+}
+
+.photo-crop-zoom {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.photo-crop-zoom input {
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.photo-crop-actions {
+  gap: 8px;
+}
+
 .history-card {
   max-height: min(80vh, 720px);
 }

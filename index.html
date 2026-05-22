@@ -150,6 +150,30 @@
       </form>
     </dialog>
 
+    <dialog class="modal photo-crop-modal" id="photoCropDialog">
+      <form class="modal-card photo-crop-card" id="photoCropForm">
+        <div class="modal-header">
+          <h2>Recortar foto</h2>
+          <button class="icon-button" type="button" data-photo-crop-cancel="true" aria-label="Fechar" title="Fechar">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m6.4 5 12.6 12.6-1.4 1.4L5 6.4 6.4 5Zm12.6 1.4L6.4 19 5 17.6 17.6 5 19 6.4Z" />
+            </svg>
+          </button>
+        </div>
+        <div class="photo-crop-stage">
+          <canvas id="photoCropCanvas" width="900" height="900"></canvas>
+        </div>
+        <label class="photo-crop-zoom">
+          Zoom
+          <input id="photoCropZoom" type="range" min="1" max="3" step="0.01" value="1" />
+        </label>
+        <div class="modal-actions photo-crop-actions">
+          <button class="primary-outline" type="button" data-photo-crop-cancel="true">Cancelar</button>
+          <button class="primary-button" type="submit">Salvar foto</button>
+        </div>
+      </form>
+    </dialog>
+
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
     <script src="./catalog-data.js"></script>
