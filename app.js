@@ -13,6 +13,12 @@ const KEYS = {
   auth: "catalogo.auth.v1",
 };
 
+const storedConfig = readJson(KEYS.config, {});
+const officialConfig = {
+  ...DATA.store,
+  ...(window.STORE_CONFIG ?? {}),
+};
+
 const money = new Intl.NumberFormat("pt-BR", {
   style: "currency",
   currency: "BRL",
@@ -39,9 +45,9 @@ const state = {
     notes: "",
   }),
   config: {
-    ...DATA.store,
-    ...(window.STORE_CONFIG ?? {}),
-    ...readJson(KEYS.config, {}),
+    ...officialConfig,
+    ...storedConfig,
+    whatsapp: String(storedConfig.whatsapp || officialConfig.whatsapp || "").replace(/\D/g, ""),
   },
 };
 
