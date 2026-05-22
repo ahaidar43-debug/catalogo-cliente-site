@@ -24,6 +24,8 @@ const money = new Intl.NumberFormat("pt-BR", {
   currency: "BRL",
 });
 
+const PAYMENT_OPTIONS = ["Pix", "Dinheiro", "A combinar"];
+
 const state = {
   query: "",
   category: "",
@@ -55,6 +57,10 @@ const state = {
     whatsapp: String(storedConfig.whatsapp || officialConfig.whatsapp || "").replace(/\D/g, ""),
   },
 };
+
+if (!PAYMENT_OPTIONS.includes(state.checkout.payment)) {
+  state.checkout.payment = "Pix";
+}
 
 const ownerMode = new URLSearchParams(window.location.search).has("dono")
   || new URLSearchParams(window.location.search).has("admin");
@@ -735,7 +741,7 @@ function buildCartHtml() {
           </label>
           <label>Pagamento
             <select name="payment">
-              ${["Pix", "Dinheiro", "Cartao", "A combinar"]
+              ${PAYMENT_OPTIONS
                 .map((value) => `<option value="${value}" ${state.checkout.payment === value ? "selected" : ""}>${value}</option>`)
                 .join("")}
             </select>
@@ -815,7 +821,7 @@ function readCheckoutForm(form) {
     phone: String(formData.get("phone") ?? ""),
     mode: String(formData.get("mode") ?? "retirada"),
     address: String(formData.get("address") ?? ""),
-    payment: String(formData.get("payment") ?? "Pix"),
+    payment: PAYMENT_OPTIONS.includes(String(formData.get("payment"))) ? String(formData.get("payment")) : "Pix",
     notes: String(formData.get("notes") ?? ""),
   };
 }
