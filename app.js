@@ -54,6 +54,7 @@ const state = {
   pendingSellerLink: null,
   sellerEvents: [],
   sellerUsers: [],
+  orderBackups: [],
   auth: readJson(KEYS.auth, null),
   cart: readJson(KEYS.cart, {}),
   checkout: readJson(KEYS.checkout, {
@@ -1101,6 +1102,27 @@ async function handleSellerDashboardClick(event) {
     return;
   }
 
+  if (button.dataset.createOrderBackup) {
+    await createOrderBackup();
+    return;
+  }
+
+  if (button.dataset.downloadBackup) {
+    await downloadRawFile(
+      `/api/backups/${encodeURIComponent(button.dataset.downloadBackup)}/download?format=${button.dataset.format || "csv"}`,
+      `backup-pedidos.${button.dataset.format || "csv"}`,
+    );
+    return;
+  }
+
+  if (button.dataset.exportOrders) {
+    await downloadRawFile(
+      `/api/orders/export?format=${button.dataset.format || "csv"}`,
+      `todos-os-pedidos.${button.dataset.format || "csv"}`,
+    );
+    return;
+  }
+
   if (button.dataset.loadAdminProducts) {
     state.adminCatalogVisible += 60;
     updateAdminCatalogList();
@@ -1280,13 +1302,18 @@ async function renderSellerDashboard(preferredCode = "") {
     };
     state.sellerOrderPage = state.sellerPagination.page;
     const adminCatalogMode = state.auth.user?.role === "admin" && state.adminView === "catalog";
-    const selectedCode = adminCatalogMode ? "" : preferredCode || state.activeSellerOrderCode || orders[0]?.code || "";
+    const adminBackupMode = state.auth.user?.role === "admin" && state.adminView === "backups";
+    const selectedCode = adminCatalogMode || adminBackupMode ? "" : preferredCode || state.activeSellerOrderCode || orders[0]?.code || "";
     selectedOrder = selectedCode ? await fetchSellerOrder(selectedCode) : null;
     state.activeSellerOrderCode = selectedOrder?.code || "";
 
     if (state.auth.user?.role === "admin") {
       const usersResponse = await apiRequest("/api/users");
       state.sellerUsers = usersResponse.users || [];
+      if (adminBackupMode) {
+        const backupsResponse = await apiRequest("/api/backups");
+        state.orderBackups = backupsResponse.backups || [];
+      }
     }
   } catch (error) {
     clearAuth();
@@ -1295,6 +1322,7 @@ async function renderSellerDashboard(preferredCode = "") {
   }
 
   const adminCatalogMode = state.auth.user?.role === "admin" && state.adminView === "catalog";
+  const adminBackupMode = state.auth.user?.role === "admin" && state.adminView === "backups";
   const sellerList = `
     ${renderAdminPanel()}
     ${renderSellerOrderFilters()}
@@ -1309,7 +1337,9 @@ async function renderSellerDashboard(preferredCode = "") {
           `
     }
   `;
-  refs.sellerOrders.innerHTML = orders.length
+  refs.sellerOrders.innerHTML = adminBackupMode
+    ? `${renderAdminPanel()}`
+    : orders.length
     ? sellerList
     : `
         ${renderAdminPanel()}
@@ -1324,6 +1354,8 @@ async function renderSellerDashboard(preferredCode = "") {
     ? renderSellerOrderDetail(selectedOrder)
     : adminCatalogMode
       ? renderAdminCatalog()
+    : adminBackupMode
+      ? renderAdminBackups()
     : `
         <div class="seller-detail-card seller-empty">
           <strong>Aguardando pedido</strong>
@@ -1405,8 +1437,9 @@ function renderSellerPagination() {
 
 function renderAdminPanel() {
   if (state.auth?.user?.role !== "admin") return "";
-  const ordersActive = state.adminView !== "catalog" ? " is-active" : "";
+  const ordersActive = state.adminView === "orders" ? " is-active" : "";
   const catalogActive = state.adminView === "catalog" ? " is-active" : "";
+  const backupsActive = state.adminView === "backups" ? " is-active" : "";
   return `
     <section class="seller-admin-panel">
       <div class="seller-admin-top">
@@ -1416,6 +1449,7 @@ function renderAdminPanel() {
       <div class="seller-admin-tabs">
         <button class="primary-outline${ordersActive}" type="button" data-admin-view="orders">Pedidos</button>
         <button class="primary-outline${catalogActive}" type="button" data-admin-view="catalog">Catalogo</button>
+        <button class="primary-outline${backupsActive}" type="button" data-admin-view="backups">Backups</button>
       </div>
       <form class="seller-user-form" data-create-user-form>
         <input name="name" type="text" placeholder="Nome" required />
@@ -1466,6 +1500,68 @@ function renderAdminCatalog() {
       <div class="admin-product-list" data-admin-product-results></div>
     </article>
   `;
+}
+
+function renderAdminBackups() {
+  const backups = state.orderBackups || [];
+  const lastBackup = backups[0];
+  return `
+    <article class="seller-detail-card admin-backup-panel">
+      <div class="seller-detail-top">
+        <div>
+          <span>Backups</span>
+          <h3>Exportacao diaria dos pedidos</h3>
+          <small>${lastBackup ? `Ultimo backup: ${formatBackupDate(lastBackup.date)} - ${lastBackup.orderCount} pedidos` : "Nenhum backup gerado ainda"}</small>
+        </div>
+        <strong>${backups.length}</strong>
+      </div>
+
+      <div class="backup-actions">
+        <button class="primary-button" type="button" data-create-order-backup="true">Gerar backup de hoje</button>
+        <button class="primary-outline" type="button" data-export-orders="true" data-format="csv">Exportar todos CSV</button>
+        <button class="primary-outline" type="button" data-export-orders="true" data-format="json">Exportar todos JSON</button>
+      </div>
+
+      <div class="backup-note">
+        <strong>Rotina ativa</strong>
+        <span>O sistema cria backup automatico todos os dias as 23:55 no horario de Sao Paulo. Se o servidor reiniciar, ele tambem confere o backup do dia anterior.</span>
+      </div>
+
+      <div class="backup-list">
+        ${
+          backups.length
+            ? backups.map(renderBackupCard).join("")
+            : `
+                <div class="seller-empty">
+                  <strong>Nenhum backup salvo</strong>
+                  <span>Clique em gerar backup de hoje para criar o primeiro arquivo agora.</span>
+                </div>
+              `
+        }
+      </div>
+    </article>
+  `;
+}
+
+function renderBackupCard(backup) {
+  return `
+    <div class="backup-card">
+      <div>
+        <strong>${escapeHtml(formatBackupDate(backup.date))}</strong>
+        <span>${Number(backup.orderCount || 0)} pedidos - ${money.format(Number(backup.totalValue || 0))}</span>
+        <small>${escapeHtml(backup.source === "manual" ? "Gerado manualmente" : "Backup automatico")} - ${escapeHtml(formatOrderDate(backup.createdAt))}</small>
+      </div>
+      <div>
+        <button class="primary-outline" type="button" data-download-backup="${escapeHtml(String(backup.id))}" data-format="csv">CSV</button>
+        <button class="primary-outline" type="button" data-download-backup="${escapeHtml(String(backup.id))}" data-format="json">JSON</button>
+      </div>
+    </div>
+  `;
+}
+
+function formatBackupDate(value) {
+  const [year, month, day] = String(value || "").slice(0, 10).split("-");
+  return year && month && day ? `${day}/${month}/${year}` : "Data indisponivel";
 }
 
 function updateAdminCatalogList() {
@@ -1854,6 +1950,33 @@ async function downloadSellerOrder(code) {
     await renderSellerDashboard(code);
   }
   showToast("Download registrado");
+}
+
+async function createOrderBackup() {
+  await apiRequest("/api/backups/run", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  const response = await apiRequest("/api/backups");
+  state.orderBackups = response.backups || [];
+  await renderSellerDashboard();
+  showToast("Backup de hoje atualizado");
+}
+
+async function downloadRawFile(path, fallbackName) {
+  const response = await apiRequest(path, { raw: true });
+  const blob = await response.blob();
+  const disposition = response.headers.get("content-disposition") || "";
+  const fileName = disposition.match(/filename="([^"]+)"/)?.[1] || fallbackName;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  showToast("Arquivo gerado");
 }
 
 function renderSellerEvents() {

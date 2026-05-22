@@ -16,6 +16,9 @@ const DATA_FILE = process.env.LOCAL_DATA_FILE || path.join(__dirname, "data", "l
 const hasPostgres = Boolean(process.env.DATABASE_URL);
 const ORDER_STATUSES = ["novo", "visualizado", "baixado", "cobrado", "pago", "cancelado"];
 const DEFAULT_ORDER_STATUS = ORDER_STATUSES[0];
+const BACKUP_TIME_ZONE = "America/Sao_Paulo";
+const DAILY_BACKUP_HOUR = Number(process.env.DAILY_BACKUP_HOUR || 23);
+const DAILY_BACKUP_MINUTE = Number(process.env.DAILY_BACKUP_MINUTE || 55);
 const CRC32_TABLE = buildCrc32Table();
 const fallbackPasswordHashes = {
   admin: "$2a$10$RKrwqOK9KXX0JNJzjSUkuuftpxRIAx5S29SjpKrkOnVhIVsSbHkvS",
@@ -34,6 +37,7 @@ app.set("trust proxy", true);
 app.use(express.json({ limit: "8mb" }));
 
 await ensureStore();
+startBackupScheduler();
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, storage: hasPostgres ? "postgres" : "file" });
@@ -140,6 +144,22 @@ app.get("/api/orders", requireAuth(["admin", "seller"]), async (req, res) => {
   });
 });
 
+app.get("/api/orders/export", requireAuth(["admin"]), async (req, res) => {
+  const format = cleanExportFormat(req.query.format);
+  const orders = await listOrdersForBackup();
+  const payload = buildOrdersBackupPayload({
+    orders,
+    scope: "todos-os-pedidos",
+    dateKey: backupDateKey(),
+  });
+  sendBackupFile(res, {
+    format,
+    fileName: `todos-os-pedidos-${payload.generatedAt.slice(0, 10)}`,
+    payload,
+    csv: buildOrdersBackupCsv(payload.orders),
+  });
+});
+
 app.get("/api/orders/:code", requireAuth(["admin", "seller"]), async (req, res) => {
   let order = await findOrderByCode(req.params.code);
   if (!order) {
@@ -182,6 +202,36 @@ app.get("/api/orders/:code/events", requireAuth(["admin"]), async (req, res) => 
     return;
   }
   res.json({ events: await listOrderEvents(order.id) });
+});
+
+app.get("/api/backups", requireAuth(["admin"]), async (_req, res) => {
+  res.json({ backups: (await listOrderBackups()).map(backupForApi) });
+});
+
+app.post("/api/backups/run", requireAuth(["admin"]), async (req, res) => {
+  const dateKey = cleanBackupDate(req.body?.date) || backupDateKey();
+  const backup = await createOrderBackup(dateKey, {
+    force: true,
+    userId: req.user.id,
+    source: "manual",
+  });
+  res.status(201).json({ backup: backupForApi(backup) });
+});
+
+app.get("/api/backups/:id/download", requireAuth(["admin"]), async (req, res) => {
+  const backup = await findOrderBackupById(req.params.id);
+  if (!backup) {
+    res.status(404).json({ error: "Backup nao encontrado" });
+    return;
+  }
+
+  const format = cleanExportFormat(req.query.format);
+  sendBackupFile(res, {
+    format,
+    fileName: `backup-pedidos-${backupDateValue(backup.backup_date)}`,
+    payload: parseJsonValue(backup.payload),
+    csv: backup.csv,
+  });
 });
 
 app.get("/api/orders/:code/download", requireAuth(["admin", "seller"]), async (req, res) => {
@@ -261,6 +311,18 @@ async function ensureStore() {
         updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+
+      CREATE TABLE IF NOT EXISTS order_backups (
+        id SERIAL PRIMARY KEY,
+        backup_date DATE UNIQUE NOT NULL,
+        source TEXT NOT NULL DEFAULT 'manual',
+        order_count INTEGER NOT NULL DEFAULT 0,
+        total_value NUMERIC(12,2) NOT NULL DEFAULT 0,
+        payload JSONB NOT NULL,
+        csv TEXT NOT NULL,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
     `);
     await pool.query(`
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'novo';
@@ -268,6 +330,7 @@ async function ensureStore() {
       CREATE INDEX IF NOT EXISTS orders_status_created_at_idx ON orders (status, created_at DESC);
       CREATE INDEX IF NOT EXISTS orders_customer_name_idx ON orders (LOWER(customer_name));
       CREATE INDEX IF NOT EXISTS orders_customer_phone_idx ON orders (customer_phone);
+      CREATE INDEX IF NOT EXISTS order_backups_created_at_idx ON order_backups (created_at DESC);
     `);
   } else {
     await loadFileStore();
@@ -548,6 +611,107 @@ async function listOrders({ page = 1, limit = 50, query = "", status = "" } = {}
   return paginatedOrders(orders.slice(offset, offset + limit), { page, limit, total: orders.length });
 }
 
+async function listOrdersForBackup({ startAt = null, endAt = null } = {}) {
+  if (hasPostgres) {
+    const values = [];
+    const filters = [];
+    if (startAt) {
+      values.push(startAt.toISOString());
+      filters.push(`created_at >= $${values.length}`);
+    }
+    if (endAt) {
+      values.push(endAt.toISOString());
+      filters.push(`created_at < $${values.length}`);
+    }
+    const whereSql = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+    const result = await pool.query(
+      `SELECT * FROM orders ${whereSql} ORDER BY created_at ASC`,
+      values,
+    );
+    return result.rows;
+  }
+
+  let orders = (await loadFileStore()).orders;
+  if (startAt) orders = orders.filter((order) => new Date(order.created_at) >= startAt);
+  if (endAt) orders = orders.filter((order) => new Date(order.created_at) < endAt);
+  return orders.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+}
+
+async function listOrderBackups() {
+  if (hasPostgres) {
+    const result = await pool.query("SELECT * FROM order_backups ORDER BY backup_date DESC LIMIT 90");
+    return result.rows;
+  }
+  return (await loadFileStore()).backups.sort((a, b) => String(b.backup_date).localeCompare(String(a.backup_date))).slice(0, 90);
+}
+
+async function findOrderBackupById(id) {
+  if (hasPostgres) {
+    const result = await pool.query("SELECT * FROM order_backups WHERE id = $1", [id]);
+    return result.rows[0] || null;
+  }
+  return (await loadFileStore()).backups.find((backup) => Number(backup.id) === Number(id)) || null;
+}
+
+async function findOrderBackupByDate(dateKey) {
+  if (hasPostgres) {
+    const result = await pool.query("SELECT * FROM order_backups WHERE backup_date = $1", [dateKey]);
+    return result.rows[0] || null;
+  }
+  return (await loadFileStore()).backups.find((backup) => backup.backup_date === dateKey) || null;
+}
+
+async function createOrderBackup(dateKey, { force = false, userId = null, source = "automatico" } = {}) {
+  const cleanDate = cleanBackupDate(dateKey);
+  if (!cleanDate) throw new Error("invalid backup date");
+
+  const existing = await findOrderBackupByDate(cleanDate);
+  if (existing && !force) return existing;
+
+  const { startAt, endAt } = backupDateRange(cleanDate);
+  const orders = await listOrdersForBackup({ startAt, endAt });
+  const payload = buildOrdersBackupPayload({ orders, scope: "dia", dateKey: cleanDate });
+  const csv = buildOrdersBackupCsv(payload.orders);
+  const totalValue = payload.orders.reduce((sum, order) => sum + Number(order.total || 0), 0);
+
+  if (hasPostgres) {
+    const result = await pool.query(
+      `INSERT INTO order_backups (backup_date, source, order_count, total_value, payload, csv, created_by)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+       ON CONFLICT (backup_date) DO UPDATE SET
+         source = EXCLUDED.source,
+         order_count = EXCLUDED.order_count,
+         total_value = EXCLUDED.total_value,
+         payload = EXCLUDED.payload,
+         csv = EXCLUDED.csv,
+         created_by = EXCLUDED.created_by,
+         created_at = NOW()
+       RETURNING *`,
+      [cleanDate, source, payload.orders.length, totalValue, JSON.stringify(payload), csv, userId],
+    );
+    return result.rows[0];
+  }
+
+  const store = await loadFileStore();
+  const backup = {
+    id: existing?.id || store.nextBackupId++,
+    backup_date: cleanDate,
+    source,
+    order_count: payload.orders.length,
+    total_value: totalValue,
+    payload,
+    csv,
+    created_by: userId,
+    created_at: new Date().toISOString(),
+  };
+  store.backups = [
+    backup,
+    ...store.backups.filter((item) => item.backup_date !== cleanDate),
+  ];
+  await saveFileStore(store);
+  return backup;
+}
+
 async function findOrderByCode(code) {
   if (hasPostgres) {
     const result = await pool.query("SELECT * FROM orders WHERE code = $1", [code]);
@@ -778,6 +942,108 @@ function eventForApi(event) {
         }
       : null,
   };
+}
+
+function backupForApi(backup) {
+  return {
+    id: backup.id,
+    date: backupDateValue(backup.backup_date),
+    source: backup.source || "automatico",
+    orderCount: Number(backup.order_count || 0),
+    totalValue: Number(backup.total_value || 0),
+    createdAt: backup.created_at,
+  };
+}
+
+function buildOrdersBackupPayload({ orders, scope, dateKey }) {
+  const normalizedOrders = orders.map(orderForBackup);
+  return {
+    generatedAt: new Date().toISOString(),
+    timeZone: BACKUP_TIME_ZONE,
+    scope,
+    date: dateKey,
+    orderCount: normalizedOrders.length,
+    totalValue: normalizedOrders.reduce((sum, order) => sum + Number(order.total || 0), 0),
+    orders: normalizedOrders,
+  };
+}
+
+function orderForBackup(order) {
+  const checkout = parseJsonValue(order.checkout);
+  const parsedItems = parseJsonValue(order.items);
+  const items = Array.isArray(parsedItems) ? parsedItems : [];
+  return {
+    code: order.code,
+    status: order.status || DEFAULT_ORDER_STATUS,
+    createdAt: order.created_at,
+    updatedAt: order.updated_at,
+    sellerUrl: order.seller_url,
+    customerName: order.customer_name,
+    customerPhone: order.customer_phone,
+    checkout,
+    items,
+    subtotal: Number(order.subtotal || 0),
+    deliveryFee: Number(order.delivery_fee || 0),
+    total: Number(order.total || 0),
+    itemCount: Number(order.item_count || 0),
+    text: order.text || "",
+  };
+}
+
+function buildOrdersBackupCsv(orders) {
+  const rows = [
+    [
+      "pedido",
+      "status",
+      "criado_em",
+      "cliente",
+      "telefone",
+      "tipo",
+      "endereco",
+      "pagamento",
+      "observacao",
+      "itens",
+      "quantidade_total",
+      "subtotal",
+      "entrega",
+      "total",
+      "link_vendedora",
+    ],
+    ...orders.map((order) => {
+      const checkout = order.checkout || {};
+      return [
+        order.code,
+        order.status,
+        order.createdAt,
+        order.customerName,
+        order.customerPhone,
+        checkout.mode || "",
+        checkout.address || "",
+        checkout.payment || "",
+        checkout.notes || "",
+        (order.items || []).map((item) => `${item.qty}x ${item.name}`).join(" | "),
+        order.itemCount,
+        csvNumber(order.subtotal),
+        csvNumber(order.deliveryFee),
+        csvNumber(order.total),
+        order.sellerUrl || "",
+      ];
+    }),
+  ];
+  return rows.map((row) => row.map(csvCell).join(";")).join("\r\n");
+}
+
+function sendBackupFile(res, { format, fileName, payload, csv }) {
+  if (format === "json") {
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${safeFileName(fileName)}.json"`);
+    res.send(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${safeFileName(fileName)}.csv"`);
+  res.send(`\ufeff${csv}`);
 }
 
 function productOverrideForApi(override) {
@@ -1059,6 +1325,81 @@ function createZip(entries) {
   return Buffer.concat([body, centralDirectory, end]);
 }
 
+function startBackupScheduler() {
+  const yesterday = addDaysToDateKey(backupDateKey(), -1);
+  createOrderBackup(yesterday, { source: "automatico" }).catch((error) => {
+    console.error("Falha ao criar backup pendente:", error);
+  });
+
+  const scheduleNext = () => {
+    const delay = Math.max(1000, nextBackupDelayMs());
+    const timer = setTimeout(async () => {
+      try {
+        await createOrderBackup(backupDateKey(), { source: "automatico", force: true });
+      } catch (error) {
+        console.error("Falha ao criar backup diario:", error);
+      } finally {
+        scheduleNext();
+      }
+    }, delay);
+    timer.unref?.();
+  };
+
+  scheduleNext();
+}
+
+function nextBackupDelayMs(now = new Date()) {
+  const today = backupDateKey(now);
+  const todayTarget = backupTargetDate(today);
+  if (todayTarget > now) return todayTarget - now;
+  return backupTargetDate(addDaysToDateKey(today, 1)) - now;
+}
+
+function backupTargetDate(dateKey) {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day, DAILY_BACKUP_HOUR + 3, DAILY_BACKUP_MINUTE, 0));
+}
+
+function backupDateRange(dateKey) {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const startAt = new Date(Date.UTC(year, month - 1, day, 3, 0, 0));
+  const endAt = new Date(startAt.getTime() + 24 * 60 * 60 * 1000);
+  return { startAt, endAt };
+}
+
+function backupDateKey(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("pt-BR", {
+    timeZone: BACKUP_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${value.year}-${value.month}-${value.day}`;
+}
+
+function cleanBackupDate(value) {
+  const text = cleanText(value);
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : "";
+}
+
+function backupDateValue(value) {
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  const text = String(value || "");
+  const match = text.match(/\d{4}-\d{2}-\d{2}/);
+  return match ? match[0] : backupDateKey();
+}
+
+function addDaysToDateKey(dateKey, days) {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day + days, 12, 0, 0));
+  return date.toISOString().slice(0, 10);
+}
+
+function cleanExportFormat(value) {
+  return cleanText(value).toLowerCase() === "json" ? "json" : "csv";
+}
+
 function dosDateTime(date) {
   const year = Math.max(1980, date.getFullYear());
   return {
@@ -1112,10 +1453,12 @@ function normalizeFileStore(store) {
     users: Array.isArray(store.users) ? store.users : [],
     orders,
     events: Array.isArray(store.events) ? store.events : [],
+    backups: Array.isArray(store.backups) ? store.backups : [],
     productOverrides: Array.isArray(store.productOverrides) ? store.productOverrides : [],
     nextUserId: Number(store.nextUserId || 1),
     nextOrderId: Number(store.nextOrderId || 1),
     nextEventId: Number(store.nextEventId || 1),
+    nextBackupId: Number(store.nextBackupId || 1),
   };
 }
 
@@ -1163,6 +1506,14 @@ function cleanImageUrl(value) {
 function numberOrZero(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : 0;
+}
+
+function csvNumber(value) {
+  return Number(value || 0).toFixed(2).replace(".", ",");
+}
+
+function csvCell(value) {
+  return `"${String(value ?? "").replace(/"/g, '""')}"`;
 }
 
 function parseJsonValue(value) {

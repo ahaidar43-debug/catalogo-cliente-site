@@ -457,7 +457,7 @@ body.owner-mode .topbar {
 
 .seller-admin-tabs {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -508,6 +508,51 @@ body.owner-mode .topbar {
 
 .admin-catalog-panel {
   align-content: start;
+}
+
+.admin-backup-panel {
+  align-content: start;
+}
+
+.backup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.backup-note,
+.backup-card {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fffdfa;
+}
+
+.backup-note span,
+.backup-card span,
+.backup-card small {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.backup-list {
+  display: grid;
+  gap: 10px;
+}
+
+.backup-card {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.backup-card > div:last-child {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
 }
 
 .admin-catalog-controls {
@@ -1596,6 +1641,14 @@ select:focus,
   .admin-catalog-controls,
   .admin-product-actions {
     grid-template-columns: 1fr;
+  }
+
+  .backup-actions,
+  .backup-card,
+  .backup-card > div:last-child {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+    flex-direction: column;
   }
 
   .admin-product-summary {
