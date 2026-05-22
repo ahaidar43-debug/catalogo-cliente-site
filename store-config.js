@@ -1,5 +1,5 @@
 window.STORE_CONFIG = {
   name: "Catalogo de Pecas",
-  whatsapp: "",
+  whatsapp: "5511996018687",
   deliveryFee: 0
 };
