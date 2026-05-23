@@ -459,7 +459,8 @@ function currentFilterLabel() {
 
 function renderProductCard(product) {
   const quantityInCart = state.cart[product.id] ?? 0;
-  const tiers = formatTiers(product);
+  const featuredPrice = featuredCatalogPrice(product);
+  const priceNote = catalogPriceNote(product, featuredPrice);
   const minQty = getInitialQty(product);
   const photoUrl = getProductPhotoUrl(product);
   const actions = quantityInCart
@@ -497,10 +498,10 @@ function renderProductCard(product) {
           <span class="meta-pill">${escapeHtml(product.id)}</span>
         </div>
         <div class="price-line">
-          <strong>${money.format(product.price || bestVisiblePrice(product))}</strong>
-          <span>min. ${minQty} peca${minQty > 1 ? "s" : ""}</span>
+          <strong>${money.format(featuredPrice.price)}</strong>
+          <span>${escapeHtml(featuredPrice.label)}</span>
         </div>
-        <div class="tier-line">${escapeHtml(tiers)}</div>
+        <div class="tier-line">${escapeHtml(priceNote)}</div>
       </div>
       <div class="product-actions">
         ${actions}
@@ -526,15 +527,52 @@ function symbolFor(type) {
   return words.map((word) => word[0]).join("").slice(0, 3).toUpperCase() || "CP";
 }
 
-function formatTiers(product) {
-  if (!product.tiers?.length) return "";
-  return product.tiers
-    .map((tier) => `${tier.minQty}+ ${money.format(tier.price)}`)
-    .join("  |  ");
+function featuredCatalogPrice(product) {
+  const tiers = sortedPriceTiers(product);
+  const fivePlusTier = tiers.find((tier) => tier.minQty === 5) || tiers.find((tier) => tier.minQty > 1);
+  const fallbackPrice = product.price ?? tiers[0]?.price ?? 0;
+  if (fivePlusTier) {
+    return {
+      minQty: fivePlusTier.minQty,
+      price: fivePlusTier.price,
+      label: `${fivePlusTier.minQty}+ pecas`,
+    };
+  }
+
+  return {
+    minQty: 1,
+    price: fallbackPrice,
+    label: "preco unitario",
+  };
 }
 
-function bestVisiblePrice(product) {
-  return product.tiers?.[0]?.price ?? product.price ?? 0;
+function catalogPriceNote(product, featuredPrice) {
+  const tiers = sortedPriceTiers(product);
+  const lowerTiers = tiers.filter((tier) => tier.minQty < featuredPrice.minQty);
+  const lowerTier = lowerTiers[lowerTiers.length - 1];
+
+  if (lowerTier && featuredPrice.minQty > 1) {
+    return `Menos de ${featuredPrice.minQty} pecas: ${money.format(lowerTier.price)} cada`;
+  }
+
+  if (featuredPrice.minQty > 1) {
+    return `Pedido minimo: ${featuredPrice.minQty} pecas`;
+  }
+
+  const otherTiers = tiers
+    .filter((tier) => tier.minQty > featuredPrice.minQty)
+    .map((tier) => `${tier.minQty}+ ${money.format(tier.price)}`);
+  return otherTiers.length ? otherTiers.join("  |  ") : "Preco para qualquer quantidade";
+}
+
+function sortedPriceTiers(product) {
+  return [...(product.tiers ?? [])]
+    .map((tier) => ({
+      minQty: Number(tier.minQty),
+      price: Number(tier.price),
+    }))
+    .filter((tier) => Number.isFinite(tier.minQty) && tier.minQty > 0 && Number.isFinite(tier.price))
+    .sort((a, b) => a.minQty - b.minQty);
 }
 
 function getInitialQty(product) {

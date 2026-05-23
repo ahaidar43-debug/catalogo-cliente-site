@@ -1110,23 +1110,28 @@ select:focus,
   align-items: baseline;
   justify-content: space-between;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .price-line strong {
   color: var(--accent-dark);
-  font-size: 19px;
+  font-size: 22px;
 }
 
 .price-line span {
-  color: var(--muted);
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 900;
 }
 
 .tier-line {
   margin-top: 8px;
-  color: var(--muted);
+  color: var(--warm);
   font-size: 12px;
+  font-weight: 800;
 }
 
 .product-actions {
@@ -1836,6 +1841,13 @@ select:focus,
 
   .product-card {
     min-height: auto;
+  }
+
+  .price-line {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+    justify-content: flex-start;
   }
 
   .product-visual,
