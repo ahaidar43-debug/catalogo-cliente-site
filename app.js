@@ -55,6 +55,7 @@ const state = {
   sellerEvents: [],
   sellerUsers: [],
   orderBackups: [],
+  lastCartCount: null,
   auth: readJson(KEYS.auth, null),
   cart: readJson(KEYS.cart, {}),
   checkout: readJson(KEYS.checkout, {
@@ -644,7 +645,13 @@ function setProductQuantity(productId, value) {
 
 function persistCart() {
   writeJson(KEYS.cart, state.cart);
-  refs.cartCount.textContent = getCartItems().reduce((sum, item) => sum + item.qty, 0);
+  const itemCount = getCartItems().reduce((sum, item) => sum + item.qty, 0);
+  refs.cartCount.textContent = itemCount;
+  if (state.lastCartCount !== null && state.lastCartCount !== itemCount) {
+    refs.openCartButton.classList.remove("is-bumping");
+    window.requestAnimationFrame(() => refs.openCartButton.classList.add("is-bumping"));
+  }
+  state.lastCartCount = itemCount;
 }
 
 function getCartItems() {
@@ -1761,7 +1768,7 @@ function clampPhotoCrop() {
 function drawPhotoCrop() {
   const canvas = refs.photoCropCanvas;
   const context = canvas.getContext("2d");
-  context.fillStyle = "#fffdfa";
+  context.fillStyle = "#fffaf0";
   context.fillRect(0, 0, canvas.width, canvas.height);
   if (!photoCrop.image) return;
   context.drawImage(
