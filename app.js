@@ -534,13 +534,14 @@ function symbolFor(type) {
 
 function featuredCatalogPrice(product) {
   const tiers = sortedPriceTiers(product);
-  const fivePlusTier = tiers.find((tier) => tier.minQty === 5) || tiers.find((tier) => tier.minQty > 1);
+  const highlightedTiers = tiers.filter((tier) => tier.minQty > 1);
+  const highlightedTier = highlightedTiers[highlightedTiers.length - 1];
   const fallbackPrice = product.price ?? tiers[0]?.price ?? 0;
-  if (fivePlusTier) {
+  if (highlightedTier) {
     return {
-      minQty: fivePlusTier.minQty,
-      price: fivePlusTier.price,
-      label: `${fivePlusTier.minQty}+ pecas`,
+      minQty: highlightedTier.minQty,
+      price: highlightedTier.price,
+      label: `${highlightedTier.minQty}+ pecas`,
     };
   }
 
