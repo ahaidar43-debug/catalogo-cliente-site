@@ -733,16 +733,22 @@ body.owner-mode .topbar {
 
 .brand-mark {
   display: grid;
-  width: 44px;
-  height: 44px;
+  width: 54px;
+  height: 54px;
   flex: 0 0 auto;
   place-items: center;
-  border-radius: var(--radius);
-  background: var(--accent);
-  color: var(--ink);
-  box-shadow: inset 0 -2px 0 rgba(111, 71, 0, 0.18);
-  font-weight: 800;
-  letter-spacing: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 8px 18px rgba(83, 55, 5, 0.12);
+}
+
+.brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .brand h1 {
@@ -1775,14 +1781,13 @@ select:focus,
   }
 
   .brand-mark {
-    width: 38px;
-    height: 38px;
-    font-size: 13px;
+    width: 42px;
+    height: 42px;
   }
 
   .brand h1 {
-    max-width: 176px;
-    font-size: 16px;
+    max-width: min(218px, calc(100vw - 170px));
+    font-size: 15px;
   }
 
   .brand p {

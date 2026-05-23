@@ -18,6 +18,10 @@ const officialConfig = {
   ...DATA.store,
   ...(window.STORE_CONFIG ?? {}),
 };
+const localConfig = { ...storedConfig };
+if (localConfig.name === "Catalogo de Pecas" && officialConfig.name) {
+  localConfig.name = officialConfig.name;
+}
 
 const money = new Intl.NumberFormat("pt-BR", {
   style: "currency",
@@ -68,8 +72,8 @@ const state = {
   }),
   config: {
     ...officialConfig,
-    ...storedConfig,
-    whatsapp: String(storedConfig.whatsapp || officialConfig.whatsapp || "").replace(/\D/g, ""),
+    ...localConfig,
+    whatsapp: String(localConfig.whatsapp || officialConfig.whatsapp || "").replace(/\D/g, ""),
   },
 };
 
@@ -227,7 +231,8 @@ function normalize(value) {
 }
 
 function renderStore() {
-  refs.storeName.textContent = state.config.name || DATA.store.name || "Catalogo de Pecas";
+  refs.storeName.textContent = state.config.name || DATA.store.name || "Posto dos Componentes";
+  document.title = state.config.name || "Posto dos Componentes";
   refs.storeSubtitle.textContent = ownerMode ? "Modo vendedora" : "Pedido online";
   refs.configStoreName.value = state.config.name || "";
   refs.configWhatsapp.value = state.config.whatsapp || "";
@@ -346,7 +351,7 @@ function bindEvents() {
   refs.configForm.addEventListener("submit", (event) => {
     event.preventDefault();
     state.config = {
-      name: refs.configStoreName.value.trim() || "Catalogo de Pecas",
+      name: refs.configStoreName.value.trim() || "Posto dos Componentes",
       whatsapp: refs.configWhatsapp.value.replace(/\D/g, ""),
       deliveryFee: Number(refs.configDeliveryFee.value || 0),
     };
