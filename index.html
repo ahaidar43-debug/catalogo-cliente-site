@@ -21,6 +21,12 @@
         </div>
 
         <div class="top-actions">
+          <button class="customer-button" id="customerButton" type="button" aria-label="Entrar como cliente" title="Entrar como cliente">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5Zm0 2c-4.4 0-8 2.2-8 5v1h16v-1c0-2.8-3.6-5-8-5Z" />
+            </svg>
+            <span id="customerButtonLabel">Entrar</span>
+          </button>
           <button class="icon-button" id="historyButton" type="button" aria-label="Pedidos salvos" title="Pedidos salvos" hidden>
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M7 3h10v4h3v14H4V7h3V3Zm2 4h6V5H9v2Zm-3 2v10h12V9H6Zm3 3h6v2H9v-2Z" />
@@ -133,6 +139,20 @@
           <button class="primary-button" id="saveConfigButton" value="default" type="submit">Salvar</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog class="modal" id="customerDialog">
+      <div class="modal-card customer-card">
+        <div class="modal-header">
+          <h2>Minha conta</h2>
+          <button class="icon-button" type="button" data-close-customer="true" aria-label="Fechar" title="Fechar">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m6.4 5 12.6 12.6-1.4 1.4L5 6.4 6.4 5Zm12.6 1.4L6.4 19 5 17.6 17.6 5 19 6.4Z" />
+            </svg>
+          </button>
+        </div>
+        <div id="customerPanel"></div>
+      </div>
     </dialog>
 
     <dialog class="modal" id="historyDialog">

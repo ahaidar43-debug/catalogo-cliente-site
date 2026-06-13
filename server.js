@@ -16,6 +16,7 @@ const DATA_FILE = process.env.LOCAL_DATA_FILE || path.join(__dirname, "data", "l
 const hasPostgres = Boolean(process.env.DATABASE_URL);
 const ORDER_STATUSES = ["novo", "visualizado", "baixado", "cobrado", "pago", "cancelado"];
 const DEFAULT_ORDER_STATUS = ORDER_STATUSES[0];
+const CUSTOMER_TOKEN_HEADER = "x-customer-token";
 const BACKUP_TIME_ZONE = "America/Sao_Paulo";
 const DAILY_BACKUP_HOUR = Number(process.env.DAILY_BACKUP_HOUR || 23);
 const DAILY_BACKUP_MINUTE = Number(process.env.DAILY_BACKUP_MINUTE || 55);
@@ -97,6 +98,64 @@ app.post("/api/users", requireAuth(["admin"]), async (req, res) => {
   }
 });
 
+app.post("/api/customers/register", async (req, res) => {
+  const name = cleanText(req.body?.name).slice(0, 120);
+  const phone = normalizePhone(req.body?.phone);
+  const pin = String(req.body?.pin || req.body?.password || "");
+
+  if (!name || !phone || pin.length < 4) {
+    res.status(400).json({ error: "Informe nome, WhatsApp e senha com pelo menos 4 numeros" });
+    return;
+  }
+
+  try {
+    const customer = await createCustomer({ name, phone, pin });
+    res.status(201).json({
+      token: signCustomerSession(customer),
+      customer: publicCustomer(customer),
+    });
+  } catch (error) {
+    if (String(error.message).includes("duplicate")) {
+      res.status(409).json({ error: "Esse WhatsApp ja tem login. Use entrar." });
+      return;
+    }
+    throw error;
+  }
+});
+
+app.post("/api/customers/login", async (req, res) => {
+  const phone = normalizePhone(req.body?.phone);
+  const pin = String(req.body?.pin || req.body?.password || "");
+  const customer = phone ? await findCustomerByPhone(phone) : null;
+  const validPassword = customer
+    && customer.active
+    && await bcrypt.compare(pin, customer.pin_hash);
+
+  if (!validPassword) {
+    res.status(401).json({ error: "WhatsApp ou senha incorretos" });
+    return;
+  }
+
+  res.json({
+    token: signCustomerSession(customer),
+    customer: publicCustomer(customer),
+  });
+});
+
+app.get("/api/customers/me", requireCustomerAuth(), (req, res) => {
+  res.json({ customer: publicCustomer(req.customer) });
+});
+
+app.get("/api/customers/orders", requireCustomerAuth(), async (req, res) => {
+  const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(50, Math.max(1, Number.parseInt(req.query.limit, 10) || 20));
+  const result = await listCustomerOrders(req.customer.phone, { page, limit });
+  res.json({
+    ...result,
+    orders: result.orders.map(orderForApi),
+  });
+});
+
 app.get("/api/catalog-overrides", async (_req, res) => {
   res.json({ overrides: await listProductOverrides() });
 });
@@ -121,14 +180,22 @@ app.patch("/api/products/:id", requireAuth(["admin"]), async (req, res) => {
 });
 
 app.post("/api/orders", async (req, res) => {
+  const customer = await customerFromHeader(req);
   const orderInput = normalizeIncomingOrder(req.body || {});
+  if (customer) {
+    orderInput.checkout.name = orderInput.checkout.name || customer.name;
+    orderInput.checkout.phone = customer.phone;
+  }
   if (!orderInput.code || !orderInput.items.length) {
     res.status(400).json({ error: "Pedido sem codigo ou sem itens" });
     return;
   }
 
   const order = await upsertOrder(orderInput, publicBaseUrl(req));
-  await logOrderEvent(order.id, null, "created", { source: "catalog" });
+  await logOrderEvent(order.id, null, "created", {
+    source: "catalog",
+    customerId: customer?.id || null,
+  });
   res.status(201).json({ order: orderForApi(order), sellerUrl: order.seller_url });
 });
 
@@ -274,6 +341,16 @@ async function ensureStore() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
 
+      CREATE TABLE IF NOT EXISTS customer_accounts (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        phone TEXT UNIQUE NOT NULL,
+        pin_hash TEXT NOT NULL,
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
       CREATE TABLE IF NOT EXISTS orders (
         id SERIAL PRIMARY KEY,
         code TEXT UNIQUE NOT NULL,
@@ -330,6 +407,7 @@ async function ensureStore() {
       CREATE INDEX IF NOT EXISTS orders_status_created_at_idx ON orders (status, created_at DESC);
       CREATE INDEX IF NOT EXISTS orders_customer_name_idx ON orders (LOWER(customer_name));
       CREATE INDEX IF NOT EXISTS orders_customer_phone_idx ON orders (customer_phone);
+      CREATE INDEX IF NOT EXISTS customer_accounts_phone_idx ON customer_accounts (phone);
       CREATE INDEX IF NOT EXISTS order_backups_created_at_idx ON order_backups (created_at DESC);
     `);
   } else {
@@ -434,6 +512,81 @@ async function findUserById(id) {
     return result.rows[0] || null;
   }
   return (await loadFileStore()).users.find((user) => Number(user.id) === Number(id)) || null;
+}
+
+async function createCustomer({ name, phone, pin }) {
+  const pinHash = await bcrypt.hash(pin, 10);
+  if (hasPostgres) {
+    const result = await pool.query(
+      `INSERT INTO customer_accounts (name, phone, pin_hash)
+       VALUES ($1, $2, $3)
+       RETURNING *`,
+      [name, phone, pinHash],
+    );
+    return result.rows[0];
+  }
+
+  const store = await loadFileStore();
+  if (store.customers.some((customer) => customer.phone === phone)) {
+    throw new Error("duplicate customer phone");
+  }
+  const customer = {
+    id: store.nextCustomerId++,
+    name,
+    phone,
+    pin_hash: pinHash,
+    active: true,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  store.customers.push(customer);
+  await saveFileStore(store);
+  return customer;
+}
+
+async function findCustomerByPhone(phone) {
+  if (hasPostgres) {
+    const result = await pool.query("SELECT * FROM customer_accounts WHERE phone = $1", [phone]);
+    return result.rows[0] || null;
+  }
+  return (await loadFileStore()).customers.find((customer) => customer.phone === phone) || null;
+}
+
+async function findCustomerById(id) {
+  if (hasPostgres) {
+    const result = await pool.query("SELECT * FROM customer_accounts WHERE id = $1", [id]);
+    return result.rows[0] || null;
+  }
+  return (await loadFileStore()).customers.find((customer) => Number(customer.id) === Number(id)) || null;
+}
+
+async function listCustomerOrders(phone, { page = 1, limit = 20 } = {}) {
+  const variants = phoneVariants(phone);
+  const offset = (page - 1) * limit;
+
+  if (hasPostgres) {
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::int AS total
+       FROM orders
+       WHERE regexp_replace(COALESCE(customer_phone, ''), '\\D', '', 'g') = ANY($1::text[])`,
+      [variants],
+    );
+    const total = Number(countResult.rows[0]?.total || 0);
+    const result = await pool.query(
+      `SELECT *
+       FROM orders
+       WHERE regexp_replace(COALESCE(customer_phone, ''), '\\D', '', 'g') = ANY($1::text[])
+       ORDER BY created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [variants, limit, offset],
+    );
+    return paginatedOrders(result.rows, { page, limit, total });
+  }
+
+  const orders = (await loadFileStore()).orders
+    .filter((order) => variants.includes(normalizePhone(order.customer_phone)))
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  return paginatedOrders(orders.slice(offset, offset + limit), { page, limit, total: orders.length });
 }
 
 async function listProductOverrides() {
@@ -835,13 +988,56 @@ function requireAuth(roles = []) {
   };
 }
 
+function requireCustomerAuth() {
+  return async (req, res, next) => {
+    try {
+      const customer = await customerFromHeader(req);
+      if (!customer || !customer.active) {
+        res.status(401).json({ error: "Entre para ver seu historico" });
+        return;
+      }
+      req.customer = customer;
+      next();
+    } catch (error) {
+      next(error);
+    }
+  };
+}
+
+async function customerFromHeader(req) {
+  const token = String(req.get(CUSTOMER_TOKEN_HEADER) || req.get("authorization") || "")
+    .replace(/^Bearer\s+/i, "");
+  let payload = null;
+  try {
+    payload = verifySession(token);
+  } catch {
+    return null;
+  }
+  if (!payload || payload.type !== "customer") return null;
+  const customer = await findCustomerById(payload.id);
+  return customer?.active ? customer : null;
+}
+
 function signSession(user) {
-  const payload = {
+  return signPayload({
     id: user.id,
     username: user.username,
     role: user.role,
+    type: "staff",
     exp: Date.now() + TOKEN_DAYS * 24 * 60 * 60 * 1000,
-  };
+  });
+}
+
+function signCustomerSession(customer) {
+  return signPayload({
+    id: customer.id,
+    phone: customer.phone,
+    type: "customer",
+    exp: Date.now() + TOKEN_DAYS * 24 * 60 * 60 * 1000,
+  });
+}
+
+function signPayload(payload) {
   const encoded = base64url(JSON.stringify(payload));
   const signature = crypto.createHmac("sha256", SESSION_SECRET).update(encoded).digest("base64url");
   return `${encoded}.${signature}`;
@@ -868,7 +1064,7 @@ function normalizeIncomingOrder(body) {
     code: cleanText(body.code).slice(0, 80),
     checkout: {
       name: cleanText(checkout.name),
-      phone: cleanText(checkout.phone),
+      phone: normalizePhone(checkout.phone),
       mode: cleanText(checkout.mode || "retirada"),
       address: cleanText(checkout.address),
       payment: cleanText(checkout.payment),
@@ -1062,6 +1258,16 @@ function publicUser(user) {
     username: user.username,
     role: user.role,
     active: user.active,
+  };
+}
+
+function publicCustomer(customer) {
+  return {
+    id: customer.id,
+    name: customer.name,
+    phone: customer.phone,
+    active: customer.active,
+    createdAt: customer.created_at,
   };
 }
 
@@ -1451,11 +1657,13 @@ function normalizeFileStore(store) {
 
   return {
     users: Array.isArray(store.users) ? store.users : [],
+    customers: Array.isArray(store.customers) ? store.customers : [],
     orders,
     events: Array.isArray(store.events) ? store.events : [],
     backups: Array.isArray(store.backups) ? store.backups : [],
     productOverrides: Array.isArray(store.productOverrides) ? store.productOverrides : [],
     nextUserId: Number(store.nextUserId || 1),
+    nextCustomerId: Number(store.nextCustomerId || 1),
     nextOrderId: Number(store.nextOrderId || 1),
     nextEventId: Number(store.nextEventId || 1),
     nextBackupId: Number(store.nextBackupId || 1),
@@ -1468,6 +1676,23 @@ function base64url(value) {
 
 function cleanText(value) {
   return String(value ?? "").trim();
+}
+
+function normalizePhone(value) {
+  const digits = String(value ?? "").replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.length === 10 || digits.length === 11) return `55${digits}`;
+  return digits;
+}
+
+function phoneVariants(value) {
+  const normalized = normalizePhone(value);
+  const variants = new Set();
+  if (normalized) variants.add(normalized);
+  if (normalized.startsWith("55") && normalized.length > 11) {
+    variants.add(normalized.slice(2));
+  }
+  return [...variants];
 }
 
 function cleanOrderStatus(value, fallback = null) {

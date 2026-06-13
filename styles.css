@@ -42,6 +42,7 @@ button,
 .product-card,
 .category-chip,
 .cart-pill,
+.customer-button,
 .primary-button,
 .primary-outline,
 .add-button,
@@ -792,6 +793,30 @@ body.owner-mode .topbar {
 .icon-button svg {
   width: 20px;
   height: 20px;
+}
+
+.customer-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.customer-button:hover {
+  border-color: var(--accent);
+  color: var(--accent-dark);
+  transform: translateY(-1px);
+}
+
+.customer-button svg {
+  width: 19px;
+  height: 19px;
 }
 
 .cart-pill {
@@ -1597,6 +1622,124 @@ select:focus,
   max-height: min(80vh, 720px);
 }
 
+.customer-card {
+  width: min(560px, calc(100vw - 28px));
+  max-height: min(86vh, 760px);
+}
+
+.customer-intro,
+.customer-profile,
+.customer-order,
+.customer-empty {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fffaf0;
+}
+
+.customer-intro {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+}
+
+.customer-intro span,
+.customer-profile span,
+.customer-order span,
+.customer-order small,
+.customer-empty {
+  color: var(--muted);
+}
+
+.customer-form,
+.customer-account,
+.customer-history {
+  display: grid;
+  gap: 10px;
+}
+
+.customer-form {
+  margin-top: 12px;
+}
+
+.customer-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.customer-form input {
+  width: 100%;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: white;
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.customer-form input:focus {
+  outline: 3px solid rgba(245, 180, 0, 0.18);
+  border-color: var(--accent);
+}
+
+.customer-actions,
+.customer-profile {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.customer-actions {
+  margin-top: 4px;
+}
+
+.customer-profile {
+  padding: 12px;
+}
+
+.customer-profile > div {
+  display: grid;
+  gap: 4px;
+}
+
+.customer-profile > div:last-child {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.customer-history {
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.customer-order {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.customer-order > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.customer-order strong {
+  color: var(--accent-dark);
+}
+
+.customer-empty {
+  padding: 14px;
+  text-align: center;
+  font-weight: 700;
+}
+
 .history-list {
   display: grid;
   gap: 10px;
@@ -1800,6 +1943,17 @@ select:focus,
 
   #historyButton {
     display: none;
+  }
+
+  .customer-button span {
+    display: none;
+  }
+
+  .customer-button {
+    width: 44px;
+    min-width: 44px;
+    padding: 0;
+    justify-content: center;
   }
 
   .cart-pill span {

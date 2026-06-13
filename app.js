@@ -11,6 +11,7 @@ const KEYS = {
   checkout: "catalogo.checkout.v1",
   orders: "catalogo.orders.v1",
   auth: "catalogo.auth.v1",
+  customerAuth: "catalogo.customerAuth.v1",
 };
 
 const storedConfig = readJson(KEYS.config, {});
@@ -59,8 +60,11 @@ const state = {
   sellerEvents: [],
   sellerUsers: [],
   orderBackups: [],
+  customerOrders: [],
+  customerPagination: { page: 1, limit: 20, total: 0, totalPages: 1 },
   lastCartCount: null,
   auth: readJson(KEYS.auth, null),
+  customerAuth: readJson(KEYS.customerAuth, null),
   cart: readJson(KEYS.cart, {}),
   checkout: readJson(KEYS.checkout, {
     name: "",
@@ -87,6 +91,10 @@ const ownerMode = new URLSearchParams(window.location.search).has("dono")
 const refs = {
   storeName: document.querySelector("#storeName"),
   storeSubtitle: document.querySelector("#storeSubtitle"),
+  customerButton: document.querySelector("#customerButton"),
+  customerButtonLabel: document.querySelector("#customerButtonLabel"),
+  customerDialog: document.querySelector("#customerDialog"),
+  customerPanel: document.querySelector("#customerPanel"),
   ownerNotice: document.querySelector("#ownerNotice"),
   sellerDashboard: document.querySelector("#sellerDashboard"),
   sellerOrders: document.querySelector("#sellerOrders"),
@@ -159,10 +167,13 @@ async function init() {
   refs.mainLayout.hidden = ownerMode;
   refs.sellerDashboard.hidden = !ownerMode;
   refs.openCartButton.hidden = ownerMode;
+  refs.customerButton.hidden = ownerMode;
   refs.historyButton.hidden = true;
   refs.configButton.hidden = true;
   refs.ownerNotice.hidden = !ownerMode;
   renderStore();
+  applyCustomerToCheckout();
+  renderCustomerButton();
   bindEvents();
   if (ownerMode) {
     state.pendingSellerLink = getSellerLinkParams();
@@ -212,6 +223,29 @@ async function apiRequest(path, options = {}) {
   return response.json();
 }
 
+async function customerApiRequest(path, options = {}) {
+  const headers = {
+    ...(options.body ? { "Content-Type": "application/json" } : {}),
+    ...(options.headers || {}),
+  };
+  if (state.customerAuth?.token) headers.Authorization = `Bearer ${state.customerAuth.token}`;
+
+  const response = await fetch(path, {
+    ...options,
+    headers,
+  });
+
+  if (!response.ok) {
+    let message = "Nao foi possivel acessar sua conta";
+    try {
+      message = (await response.json()).error || message;
+    } catch {}
+    throw new Error(message);
+  }
+
+  return response.json();
+}
+
 function saveAuth(auth) {
   state.auth = auth;
   writeJson(KEYS.auth, auth);
@@ -220,6 +254,20 @@ function saveAuth(auth) {
 function clearAuth() {
   state.auth = null;
   localStorage.removeItem(KEYS.auth);
+}
+
+function saveCustomerAuth(auth) {
+  state.customerAuth = auth;
+  writeJson(KEYS.customerAuth, auth);
+  applyCustomerToCheckout(true);
+  renderCustomerButton();
+}
+
+function clearCustomerAuth() {
+  state.customerAuth = null;
+  state.customerOrders = [];
+  localStorage.removeItem(KEYS.customerAuth);
+  renderCustomerButton();
 }
 
 function normalize(value) {
@@ -237,6 +285,28 @@ function renderStore() {
   refs.configStoreName.value = state.config.name || "";
   refs.configWhatsapp.value = state.config.whatsapp || "";
   refs.configDeliveryFee.value = Number(state.config.deliveryFee || 0).toFixed(2);
+}
+
+function renderCustomerButton() {
+  const customer = state.customerAuth?.customer;
+  refs.customerButtonLabel.textContent = customer ? "Minha conta" : "Entrar";
+  refs.customerButton.title = customer ? `Minha conta - ${customer.name}` : "Entrar como cliente";
+  refs.customerButton.setAttribute("aria-label", refs.customerButton.title);
+}
+
+function applyCustomerToCheckout(force = false) {
+  const customer = state.customerAuth?.customer;
+  if (!customer) return;
+  let changed = false;
+  if ((force || !state.checkout.name) && customer.name) {
+    state.checkout.name = customer.name;
+    changed = true;
+  }
+  if ((force || !state.checkout.phone) && customer.phone) {
+    state.checkout.phone = customer.phone;
+    changed = true;
+  }
+  if (changed) writeJson(KEYS.checkout, state.checkout);
 }
 
 function renderBrandOptions() {
@@ -343,6 +413,10 @@ function bindEvents() {
   refs.mobileOrderButton.addEventListener("click", openMobileCart);
   refs.cartBackdrop.addEventListener("click", closeMobileCart);
 
+  refs.customerButton.addEventListener("click", openCustomerDialog);
+  refs.customerDialog.addEventListener("click", handleCustomerDialogClick);
+  refs.customerDialog.addEventListener("submit", handleCustomerDialogSubmit);
+
   refs.configButton.addEventListener("click", () => {
     renderStore();
     refs.configDialog.showModal();
@@ -390,6 +464,166 @@ function bindEvents() {
   refs.photoCropCanvas.addEventListener("pointermove", movePhotoCropDrag);
   refs.photoCropCanvas.addEventListener("pointerup", endPhotoCropDrag);
   refs.photoCropCanvas.addEventListener("pointercancel", endPhotoCropDrag);
+}
+
+async function openCustomerDialog() {
+  renderCustomerPanel();
+  refs.customerDialog.showModal();
+  if (state.customerAuth?.token) {
+    await loadCustomerOrders();
+    renderCustomerPanel();
+  }
+}
+
+function renderCustomerPanel(errorMessage = "") {
+  const customer = state.customerAuth?.customer;
+  if (!customer) {
+    refs.customerPanel.innerHTML = `
+      <div class="customer-intro">
+        <strong>Historico pelo WhatsApp</strong>
+        <span>Crie um login simples para ver seus pedidos feitos neste catalogo.</span>
+      </div>
+      <form class="customer-form" data-customer-form>
+        <label>Nome
+          <input name="name" type="text" autocomplete="name" value="${escapeHtml(state.checkout.name)}" />
+        </label>
+        <label>WhatsApp
+          <input name="phone" type="tel" inputmode="tel" autocomplete="tel" value="${escapeHtml(state.checkout.phone)}" required />
+        </label>
+        <label>Senha simples
+          <input name="pin" type="password" inputmode="numeric" autocomplete="current-password" minlength="4" placeholder="Minimo 4 numeros" required />
+        </label>
+        ${errorMessage ? `<div class="seller-error">${escapeHtml(errorMessage)}</div>` : ""}
+        <div class="customer-actions">
+          <button class="primary-button" type="submit" data-customer-action="login">Entrar</button>
+          <button class="primary-outline" type="submit" data-customer-action="register">Criar login</button>
+        </div>
+      </form>
+    `;
+    return;
+  }
+
+  const orders = state.customerOrders || [];
+  const pagination = state.customerPagination;
+  refs.customerPanel.innerHTML = `
+    <section class="customer-account">
+      <div class="customer-profile">
+        <div>
+          <strong>Ola, ${escapeHtml(customer.name)}</strong>
+          <span>${escapeHtml(formatPhone(customer.phone))}</span>
+        </div>
+        <div>
+          <button class="primary-outline" type="button" data-refresh-customer-orders="true">Atualizar</button>
+          <button class="text-button" type="button" data-customer-logout="true">Sair</button>
+        </div>
+      </div>
+      <div class="customer-history">
+        ${
+          orders.length
+            ? orders.map(renderCustomerOrder).join("")
+            : `<div class="customer-empty">Nenhum pedido encontrado para esse WhatsApp ainda.</div>`
+        }
+      </div>
+      ${
+        pagination.totalPages > 1
+          ? `<div class="seller-pagination customer-pagination">
+              <button class="primary-outline" type="button" data-customer-page="${pagination.page - 1}" ${pagination.page <= 1 ? "disabled" : ""}>Anterior</button>
+              <span>Pagina ${pagination.page} de ${pagination.totalPages}</span>
+              <button class="primary-outline" type="button" data-customer-page="${pagination.page + 1}" ${pagination.page >= pagination.totalPages ? "disabled" : ""}>Proxima</button>
+            </div>`
+          : ""
+      }
+    </section>
+  `;
+}
+
+function renderCustomerOrder(order) {
+  const items = Array.isArray(order.items) ? order.items : [];
+  const previewItems = items.slice(0, 3).map((item) => `${item.qty}x ${item.name}`).join(" | ");
+  return `
+    <article class="customer-order">
+      <div>
+        <strong>${escapeHtml(order.code)}</strong>
+        <span>${escapeHtml(orderStatusLabel(order.status))} - ${escapeHtml(formatOrderDate(order.createdAt))}</span>
+      </div>
+      <small>${escapeHtml(previewItems || "Pedido sem itens")}${items.length > 3 ? ` +${items.length - 3} itens` : ""}</small>
+      <div>
+        <span>${Number(order.itemCount || 0)} pecas</span>
+        <strong>${money.format(order.total || 0)}</strong>
+      </div>
+    </article>
+  `;
+}
+
+async function loadCustomerOrders(page = state.customerPagination.page || 1) {
+  if (!state.customerAuth?.token) return;
+  try {
+    const response = await customerApiRequest(`/api/customers/orders?page=${page}&limit=20`);
+    state.customerOrders = response.orders || [];
+    state.customerPagination = {
+      page: Number(response.page || page),
+      limit: Number(response.limit || 20),
+      total: Number(response.total || 0),
+      totalPages: Number(response.totalPages || 1),
+    };
+  } catch (error) {
+    clearCustomerAuth();
+    renderCustomerPanel(error.message);
+  }
+}
+
+async function handleCustomerDialogSubmit(event) {
+  const form = event.target.closest("[data-customer-form]");
+  if (!form) return;
+  event.preventDefault();
+  const formData = new FormData(form);
+  const action = event.submitter?.dataset.customerAction === "register" ? "register" : "login";
+  const body = {
+    name: String(formData.get("name") || "").trim(),
+    phone: String(formData.get("phone") || "").trim(),
+    pin: String(formData.get("pin") || ""),
+  };
+
+  try {
+    const auth = await customerApiRequest(`/api/customers/${action}`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    saveCustomerAuth(auth);
+    renderCart();
+    await loadCustomerOrders(1);
+    renderCustomerPanel();
+    showToast(action === "register" ? "Login criado" : "Cliente conectado");
+  } catch (error) {
+    renderCustomerPanel(error.message);
+  }
+}
+
+async function handleCustomerDialogClick(event) {
+  if (event.target.closest("[data-close-customer]")) {
+    refs.customerDialog.close();
+    return;
+  }
+
+  if (event.target.closest("[data-customer-logout]")) {
+    clearCustomerAuth();
+    renderCustomerPanel();
+    showToast("Cliente saiu da conta");
+    return;
+  }
+
+  if (event.target.closest("[data-refresh-customer-orders]")) {
+    await loadCustomerOrders();
+    renderCustomerPanel();
+    showToast("Historico atualizado");
+    return;
+  }
+
+  const pageButton = event.target.closest("[data-customer-page]");
+  if (pageButton) {
+    await loadCustomerOrders(Math.max(1, Number(pageButton.dataset.customerPage) || 1));
+    renderCustomerPanel();
+  }
 }
 
 async function loadCatalogOverrides() {
@@ -1058,9 +1292,13 @@ async function prepareOrderForSending() {
   try {
     const saved = await apiRequest("/api/orders", {
       method: "POST",
+      headers: state.customerAuth?.token ? { "X-Customer-Token": state.customerAuth.token } : {},
       body: JSON.stringify(order),
     });
     const sellerUrl = saved.sellerUrl || saved.order?.sellerUrl;
+    if (state.customerAuth?.token) {
+      await loadCustomerOrders(1);
+    }
     if (sellerUrl) {
       return {
         ...order,
@@ -2068,6 +2306,20 @@ function eventDetailText(event) {
 function formatOrderDate(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("pt-BR");
+}
+
+function formatPhone(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (digits.length === 13 && digits.startsWith("55")) {
+    return `+55 ${digits.slice(2, 4)} ${digits.slice(4, 9)}-${digits.slice(9)}`;
+  }
+  if (digits.length === 12 && digits.startsWith("55")) {
+    return `+55 ${digits.slice(2, 4)} ${digits.slice(4, 8)}-${digits.slice(8)}`;
+  }
+  if (digits.length === 11) {
+    return `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7)}`;
+  }
+  return value || "";
 }
 
 function buildReadableOrderText(order) {
