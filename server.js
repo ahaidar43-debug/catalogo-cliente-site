@@ -16,6 +16,8 @@ const DATA_FILE = process.env.LOCAL_DATA_FILE || path.join(__dirname, "data", "l
 const hasPostgres = Boolean(process.env.DATABASE_URL);
 const ORDER_STATUSES = ["novo", "visualizado", "baixado", "cobrado", "pago", "cancelado"];
 const DEFAULT_ORDER_STATUS = ORDER_STATUSES[0];
+const STOCK_STATUSES = ["available", "low", "out"];
+const DEFAULT_STOCK_STATUS = STOCK_STATUSES[0];
 const CUSTOMER_TOKEN_HEADER = "x-customer-token";
 const BACKUP_TIME_ZONE = "America/Sao_Paulo";
 const DAILY_BACKUP_HOUR = Number(process.env.DAILY_BACKUP_HOUR || 23);
@@ -156,6 +158,37 @@ app.get("/api/customers/orders", requireCustomerAuth(), async (req, res) => {
   });
 });
 
+app.get("/api/customers/favorites", requireCustomerAuth(), async (req, res) => {
+  res.json({ favorites: await listCustomerFavorites(req.customer.id) });
+});
+
+app.put("/api/customers/favorites/:productId", requireCustomerAuth(), async (req, res) => {
+  const favorites = await setCustomerFavorite(req.customer.id, req.params.productId, true);
+  res.json({ favorites });
+});
+
+app.delete("/api/customers/favorites/:productId", requireCustomerAuth(), async (req, res) => {
+  const favorites = await setCustomerFavorite(req.customer.id, req.params.productId, false);
+  res.json({ favorites });
+});
+
+app.get("/api/customers/summary", requireAuth(["admin"]), async (req, res) => {
+  const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 40));
+  const query = cleanText(req.query.q).slice(0, 120);
+  res.json(await listCustomerSummaries({ page, limit, query }));
+});
+
+app.get("/api/customers/:phone/orders", requireAuth(["admin"]), async (req, res) => {
+  const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 20));
+  const result = await listCustomerOrders(req.params.phone, { page, limit });
+  res.json({
+    ...result,
+    orders: result.orders.map(orderSummaryForApi),
+  });
+});
+
 app.get("/api/catalog-overrides", async (_req, res) => {
   res.json({ overrides: await listProductOverrides() });
 });
@@ -170,12 +203,19 @@ app.patch("/api/products/:id", requireAuth(["admin"]), async (req, res) => {
   }
 
   const active = typeof req.body?.active === "boolean" ? req.body.active : undefined;
-  if (active === undefined && imageUrl === undefined) {
+  const stockStatus = Object.hasOwn(req.body || {}, "stockStatus")
+    ? cleanStockStatus(req.body.stockStatus, undefined)
+    : undefined;
+  if (Object.hasOwn(req.body || {}, "stockStatus") && !stockStatus) {
+    res.status(400).json({ error: "Status de estoque invalido" });
+    return;
+  }
+  if (active === undefined && imageUrl === undefined && stockStatus === undefined) {
     res.status(400).json({ error: "Informe o que deseja alterar no item" });
     return;
   }
 
-  const override = await upsertProductOverride(req.params.id, { active, imageUrl }, req.user.id);
+  const override = await upsertProductOverride(req.params.id, { active, imageUrl, stockStatus }, req.user.id);
   res.json({ override });
 });
 
@@ -385,8 +425,16 @@ async function ensureStore() {
         product_id TEXT UNIQUE NOT NULL,
         active BOOLEAN,
         image_url TEXT NOT NULL DEFAULT '',
+        stock_status TEXT NOT NULL DEFAULT 'available',
         updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS customer_favorites (
+        customer_id INTEGER NOT NULL REFERENCES customer_accounts(id) ON DELETE CASCADE,
+        product_id TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (customer_id, product_id)
       );
 
       CREATE TABLE IF NOT EXISTS order_backups (
@@ -403,11 +451,13 @@ async function ensureStore() {
     `);
     await pool.query(`
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'novo';
+      ALTER TABLE product_overrides ADD COLUMN IF NOT EXISTS stock_status TEXT NOT NULL DEFAULT 'available';
       CREATE INDEX IF NOT EXISTS orders_created_at_idx ON orders (created_at DESC);
       CREATE INDEX IF NOT EXISTS orders_status_created_at_idx ON orders (status, created_at DESC);
       CREATE INDEX IF NOT EXISTS orders_customer_name_idx ON orders (LOWER(customer_name));
       CREATE INDEX IF NOT EXISTS orders_customer_phone_idx ON orders (customer_phone);
       CREATE INDEX IF NOT EXISTS customer_accounts_phone_idx ON customer_accounts (phone);
+      CREATE INDEX IF NOT EXISTS customer_favorites_customer_idx ON customer_favorites (customer_id);
       CREATE INDEX IF NOT EXISTS order_backups_created_at_idx ON order_backups (created_at DESC);
     `);
   } else {
@@ -589,10 +639,125 @@ async function listCustomerOrders(phone, { page = 1, limit = 20 } = {}) {
   return paginatedOrders(orders.slice(offset, offset + limit), { page, limit, total: orders.length });
 }
 
+async function listCustomerFavorites(customerId) {
+  if (hasPostgres) {
+    const result = await pool.query(
+      `SELECT product_id
+       FROM customer_favorites
+       WHERE customer_id = $1
+       ORDER BY created_at DESC`,
+      [customerId],
+    );
+    return result.rows.map((row) => row.product_id);
+  }
+
+  const store = await loadFileStore();
+  return store.favorites
+    .filter((favorite) => Number(favorite.customer_id) === Number(customerId))
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+    .map((favorite) => favorite.product_id);
+}
+
+async function setCustomerFavorite(customerId, productId, enabled) {
+  const cleanProductId = cleanText(productId).slice(0, 120);
+  if (!cleanProductId) return listCustomerFavorites(customerId);
+
+  if (hasPostgres) {
+    if (enabled) {
+      await pool.query(
+        `INSERT INTO customer_favorites (customer_id, product_id)
+         VALUES ($1, $2)
+         ON CONFLICT (customer_id, product_id) DO NOTHING`,
+        [customerId, cleanProductId],
+      );
+    } else {
+      await pool.query(
+        "DELETE FROM customer_favorites WHERE customer_id = $1 AND product_id = $2",
+        [customerId, cleanProductId],
+      );
+    }
+    return listCustomerFavorites(customerId);
+  }
+
+  const store = await loadFileStore();
+  store.favorites = store.favorites.filter((favorite) => !(
+    Number(favorite.customer_id) === Number(customerId)
+    && favorite.product_id === cleanProductId
+  ));
+  if (enabled) {
+    store.favorites.unshift({
+      customer_id: customerId,
+      product_id: cleanProductId,
+      created_at: new Date().toISOString(),
+    });
+  }
+  await saveFileStore(store);
+  return listCustomerFavorites(customerId);
+}
+
+async function listCustomerSummaries({ page = 1, limit = 40, query = "" } = {}) {
+  const orders = await listOrdersForBackup();
+  const summaries = new Map();
+
+  for (const order of orders) {
+    const phone = normalizePhone(order.customer_phone);
+    const fallbackKey = normalizeSearch(order.customer_name) || order.code;
+    const key = phone || `sem-telefone-${fallbackKey}`;
+    const createdAt = order.created_at || new Date().toISOString();
+    const summary = summaries.get(key) || {
+      key,
+      name: order.customer_name || "Cliente",
+      phone: phone || order.customer_phone || "",
+      orderCount: 0,
+      totalValue: 0,
+      itemCount: 0,
+      openCount: 0,
+      paidCount: 0,
+      cancelledCount: 0,
+      lastOrderAt: createdAt,
+      lastOrderCode: order.code,
+    };
+
+    summary.orderCount += 1;
+    summary.totalValue += Number(order.total || 0);
+    summary.itemCount += Number(order.item_count || 0);
+
+    const status = order.status || DEFAULT_ORDER_STATUS;
+    if (status === "pago") summary.paidCount += 1;
+    else if (status === "cancelado") summary.cancelledCount += 1;
+    else summary.openCount += 1;
+
+    if (new Date(createdAt) >= new Date(summary.lastOrderAt)) {
+      summary.name = order.customer_name || summary.name;
+      summary.phone = phone || order.customer_phone || summary.phone;
+      summary.lastOrderAt = createdAt;
+      summary.lastOrderCode = order.code;
+    }
+
+    summaries.set(key, summary);
+  }
+
+  let customers = [...summaries.values()].sort((a, b) => new Date(b.lastOrderAt) - new Date(a.lastOrderAt));
+  if (query) {
+    const needle = normalizeSearch(query);
+    customers = customers.filter((customer) => normalizeSearch(`${customer.name} ${customer.phone}`).includes(needle));
+  }
+
+  const total = customers.length;
+  const offset = (page - 1) * limit;
+  return {
+    customers: customers.slice(offset, offset + limit),
+    page,
+    limit,
+    total,
+    totalPages: Math.max(1, Math.ceil(total / limit)),
+  };
+}
+
 async function listProductOverrides() {
   if (hasPostgres) {
     const result = await pool.query(
-      `SELECT product_id, active, image_url, updated_at
+      `SELECT product_id, active, image_url, stock_status, updated_at
        FROM product_overrides
        ORDER BY updated_at DESC`,
     );
@@ -620,19 +785,23 @@ async function upsertProductOverride(productId, patch, userId) {
     product_id: cleanProductId,
     active: patch.active === undefined ? existing?.active ?? null : patch.active,
     image_url: patch.imageUrl === undefined ? existing?.image_url ?? "" : patch.imageUrl,
+    stock_status: patch.stockStatus === undefined
+      ? cleanStockStatus(existing?.stock_status, DEFAULT_STOCK_STATUS)
+      : cleanStockStatus(patch.stockStatus, DEFAULT_STOCK_STATUS),
   };
 
   if (hasPostgres) {
     const result = await pool.query(
-      `INSERT INTO product_overrides (product_id, active, image_url, updated_by, updated_at)
-       VALUES ($1, $2, $3, $4, NOW())
+      `INSERT INTO product_overrides (product_id, active, image_url, stock_status, updated_by, updated_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
        ON CONFLICT (product_id) DO UPDATE SET
         active = EXCLUDED.active,
         image_url = EXCLUDED.image_url,
+        stock_status = EXCLUDED.stock_status,
         updated_by = EXCLUDED.updated_by,
         updated_at = NOW()
-       RETURNING product_id, active, image_url, updated_at`,
-      [next.product_id, next.active, next.image_url, userId],
+       RETURNING product_id, active, image_url, stock_status, updated_at`,
+      [next.product_id, next.active, next.image_url, next.stock_status, userId],
     );
     return productOverrideForApi(result.rows[0]);
   }
@@ -1247,6 +1416,7 @@ function productOverrideForApi(override) {
     productId: override.product_id,
     active: typeof override.active === "boolean" ? override.active : override.active ?? null,
     imageUrl: override.image_url || "",
+    stockStatus: cleanStockStatus(override.stock_status, DEFAULT_STOCK_STATUS),
     updatedAt: override.updated_at,
   };
 }
@@ -1661,7 +1831,13 @@ function normalizeFileStore(store) {
     orders,
     events: Array.isArray(store.events) ? store.events : [],
     backups: Array.isArray(store.backups) ? store.backups : [],
-    productOverrides: Array.isArray(store.productOverrides) ? store.productOverrides : [],
+    favorites: Array.isArray(store.favorites) ? store.favorites : [],
+    productOverrides: Array.isArray(store.productOverrides)
+      ? store.productOverrides.map((override) => ({
+          ...override,
+          stock_status: cleanStockStatus(override.stock_status, DEFAULT_STOCK_STATUS),
+        }))
+      : [],
     nextUserId: Number(store.nextUserId || 1),
     nextCustomerId: Number(store.nextCustomerId || 1),
     nextOrderId: Number(store.nextOrderId || 1),
@@ -1698,6 +1874,11 @@ function phoneVariants(value) {
 function cleanOrderStatus(value, fallback = null) {
   const status = cleanText(value).toLowerCase();
   return ORDER_STATUSES.includes(status) ? status : fallback;
+}
+
+function cleanStockStatus(value, fallback = DEFAULT_STOCK_STATUS) {
+  const status = cleanText(value).toLowerCase();
+  return STOCK_STATUSES.includes(status) ? status : fallback;
 }
 
 function paginatedOrders(orders, { page, limit, total }) {

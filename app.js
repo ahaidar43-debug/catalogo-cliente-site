@@ -12,6 +12,7 @@ const KEYS = {
   orders: "catalogo.orders.v1",
   auth: "catalogo.auth.v1",
   customerAuth: "catalogo.customerAuth.v1",
+  favorites: "catalogo.favorites.v1",
 };
 
 const storedConfig = readJson(KEYS.config, {});
@@ -38,12 +39,18 @@ const ORDER_STATUSES = [
   { value: "pago", label: "Pago" },
   { value: "cancelado", label: "Cancelado" },
 ];
+const STOCK_STATUS_OPTIONS = [
+  { value: "available", label: "Disponivel", customerLabel: "Disponivel" },
+  { value: "low", label: "Baixo estoque", customerLabel: "Baixo estoque" },
+  { value: "out", label: "Esgotado", customerLabel: "Esgotado" },
+];
 const ORDER_PAGE_SIZE = 50;
 
 const state = {
   query: "",
   category: "",
   brand: "",
+  favoritesOnly: false,
   visible: 72,
   currentOrderCode: "",
   activeSellerOrderCode: "",
@@ -60,8 +67,16 @@ const state = {
   sellerEvents: [],
   sellerUsers: [],
   orderBackups: [],
+  adminCustomerQuery: "",
+  adminCustomerPage: 1,
+  adminCustomers: [],
+  adminCustomerPagination: { page: 1, limit: 40, total: 0, totalPages: 1 },
+  activeAdminCustomerPhone: "",
+  adminCustomerOrders: [],
+  adminCustomerOrdersPagination: { page: 1, limit: 20, total: 0, totalPages: 1 },
   customerOrders: [],
   customerPagination: { page: 1, limit: 20, total: 0, totalPages: 1 },
+  favoriteProductIds: new Set(readJson(KEYS.favorites, [])),
   lastCartCount: null,
   auth: readJson(KEYS.auth, null),
   customerAuth: readJson(KEYS.customerAuth, null),
@@ -152,6 +167,7 @@ const photoCrop = {
 DATA.products.forEach((product) => {
   product.baseActive = Boolean(product.active);
   product.baseImageUrl = product.imageUrl || "";
+  product.baseStockStatus = "available";
 });
 
 let activeProducts = [];
@@ -163,6 +179,7 @@ init();
 
 async function init() {
   await loadCatalogOverrides();
+  if (state.customerAuth?.token) await loadCustomerFavorites();
   document.body.classList.toggle("owner-mode", ownerMode);
   refs.mainLayout.hidden = ownerMode;
   refs.sellerDashboard.hidden = !ownerMode;
@@ -270,6 +287,59 @@ function clearCustomerAuth() {
   renderCustomerButton();
 }
 
+function saveFavoriteProducts() {
+  writeJson(KEYS.favorites, [...state.favoriteProductIds]);
+}
+
+function replaceFavoriteProducts(productIds) {
+  state.favoriteProductIds = new Set((productIds || []).filter(Boolean));
+  saveFavoriteProducts();
+}
+
+async function loadCustomerFavorites() {
+  if (!state.customerAuth?.token) return;
+  try {
+    const response = await customerApiRequest("/api/customers/favorites");
+    replaceFavoriteProducts(response.favorites || []);
+  } catch {
+    clearCustomerAuth();
+  }
+}
+
+async function toggleFavoriteProduct(productId) {
+  const product = productsById.get(productId);
+  if (!product) return;
+
+  const wasFavorite = state.favoriteProductIds.has(productId);
+  if (wasFavorite) state.favoriteProductIds.delete(productId);
+  else state.favoriteProductIds.add(productId);
+  saveFavoriteProducts();
+  renderCategoryChips();
+  renderProducts();
+
+  if (!state.customerAuth?.token) {
+    showToast(wasFavorite ? "Favorito removido deste celular" : "Favorito salvo neste celular");
+    return;
+  }
+
+  try {
+    const response = await customerApiRequest(`/api/customers/favorites/${encodeURIComponent(productId)}`, {
+      method: wasFavorite ? "DELETE" : "PUT",
+    });
+    replaceFavoriteProducts(response.favorites || []);
+    renderCategoryChips();
+    renderProducts();
+    showToast(wasFavorite ? "Favorito removido" : "Favorito salvo");
+  } catch (error) {
+    if (wasFavorite) state.favoriteProductIds.add(productId);
+    else state.favoriteProductIds.delete(productId);
+    saveFavoriteProducts();
+    renderCategoryChips();
+    renderProducts();
+    showToast(error.message);
+  }
+}
+
 function normalize(value) {
   return String(value ?? "")
     .normalize("NFD")
@@ -324,18 +394,30 @@ function renderCategoryChips() {
       ...category,
       count: categoryCounts.get(category.name) ?? category.count,
     }));
+  const favoriteCount = activeProducts.filter((product) => state.favoriteProductIds.has(product.id)).length;
 
   refs.categoryStrip.innerHTML = [
     categoryButton("", "Todos", activeProducts.length),
+    favoriteCategoryButton(favoriteCount),
     ...categories.map((category) => categoryButton(category.name, category.name, category.count)),
   ].join("");
 }
 
 function categoryButton(value, label, count) {
-  const active = state.category === value ? " is-active" : "";
+  const active = !state.favoritesOnly && state.category === value ? " is-active" : "";
   return `
     <button class="category-chip${active}" type="button" data-category="${escapeHtml(value)}">
       ${escapeHtml(label)}
+      <span>${count}</span>
+    </button>
+  `;
+}
+
+function favoriteCategoryButton(count) {
+  const active = state.favoritesOnly ? " is-active" : "";
+  return `
+    <button class="category-chip favorite-filter${active}" type="button" data-favorites-filter="true">
+      Favoritos
       <span>${count}</span>
     </button>
   `;
@@ -355,9 +437,19 @@ function bindEvents() {
   });
 
   refs.categoryStrip.addEventListener("click", (event) => {
+    if (event.target.closest("[data-favorites-filter]")) {
+      state.favoritesOnly = !state.favoritesOnly;
+      state.category = "";
+      state.visible = 72;
+      renderCategoryChips();
+      renderProducts();
+      return;
+    }
+
     const button = event.target.closest("[data-category]");
     if (!button) return;
     state.category = button.dataset.category;
+    state.favoritesOnly = false;
     state.visible = 72;
     renderCategoryChips();
     renderProducts();
@@ -367,6 +459,7 @@ function bindEvents() {
     state.query = "";
     state.category = "";
     state.brand = "";
+    state.favoritesOnly = false;
     state.visible = 72;
     refs.searchInput.value = "";
     refs.brandSelect.value = "";
@@ -380,6 +473,12 @@ function bindEvents() {
   });
 
   refs.productGrid.addEventListener("click", (event) => {
+    const favoriteButton = event.target.closest("[data-toggle-favorite]");
+    if (favoriteButton) {
+      toggleFavoriteProduct(favoriteButton.dataset.toggleFavorite);
+      return;
+    }
+
     const addButton = event.target.closest("[data-add-product]");
     if (addButton) {
       addProduct(addButton.dataset.addProduct);
@@ -551,6 +650,7 @@ function renderCustomerOrder(order) {
         <span>${Number(order.itemCount || 0)} pecas</span>
         <strong>${money.format(order.total || 0)}</strong>
       </div>
+      <button class="primary-outline" type="button" data-repeat-order="${escapeHtml(order.code)}">Repetir pedido</button>
     </article>
   `;
 }
@@ -590,7 +690,10 @@ async function handleCustomerDialogSubmit(event) {
       body: JSON.stringify(body),
     });
     saveCustomerAuth(auth);
+    await loadCustomerFavorites();
     renderCart();
+    renderCategoryChips();
+    renderProducts();
     await loadCustomerOrders(1);
     renderCustomerPanel();
     showToast(action === "register" ? "Login criado" : "Cliente conectado");
@@ -619,11 +722,56 @@ async function handleCustomerDialogClick(event) {
     return;
   }
 
+  const repeatButton = event.target.closest("[data-repeat-order]");
+  if (repeatButton) {
+    repeatCustomerOrder(repeatButton.dataset.repeatOrder);
+    return;
+  }
+
   const pageButton = event.target.closest("[data-customer-page]");
   if (pageButton) {
     await loadCustomerOrders(Math.max(1, Number(pageButton.dataset.customerPage) || 1));
     renderCustomerPanel();
   }
+}
+
+function repeatCustomerOrder(code) {
+  const order = (state.customerOrders || []).find((item) => item.code === code);
+  if (!order) return;
+
+  const nextCart = {};
+  let skipped = 0;
+  for (const item of order.items || []) {
+    const product = findProductForOrderItem(item);
+    if (!product || !product.active || productStockStatus(product).value === "out") {
+      skipped += 1;
+      continue;
+    }
+    const qty = Math.max(Number.parseInt(String(item.qty || 0), 10) || 1, getInitialQty(product));
+    nextCart[product.id] = qty;
+  }
+
+  if (!Object.keys(nextCart).length) {
+    showToast("Nao ha itens ativos para repetir");
+    return;
+  }
+
+  state.cart = nextCart;
+  state.currentOrderCode = "";
+  applyCustomerToCheckout(true);
+  persistCart();
+  renderProducts();
+  renderCart();
+  refs.customerDialog.close();
+  if (window.matchMedia("(max-width: 1080px)").matches) openMobileCart();
+  showToast(skipped ? "Pedido repetido com itens disponiveis" : "Pedido repetido no carrinho");
+}
+
+function findProductForOrderItem(item) {
+  if (item.id && productsById.has(item.id)) return productsById.get(item.id);
+  const name = normalize(item.name);
+  if (!name) return null;
+  return DATA.products.find((product) => normalize(product.name) === name) || null;
 }
 
 async function loadCatalogOverrides() {
@@ -644,11 +792,13 @@ function applyCatalogOverrides(overrides) {
   DATA.products.forEach((product) => {
     product.active = product.baseActive;
     product.imageUrl = product.baseImageUrl || "";
+    product.stockStatus = product.baseStockStatus || "available";
 
     const override = state.catalogOverrides.get(product.id);
     if (!override) return;
     if (typeof override.active === "boolean") product.active = override.active;
     if (typeof override.imageUrl === "string") product.imageUrl = override.imageUrl;
+    if (override.stockStatus) product.stockStatus = override.stockStatus;
   });
 }
 
@@ -666,6 +816,7 @@ function getFilteredProducts() {
   const queryParts = query.split(/\s+/).filter(Boolean);
 
   return activeProducts.filter((product) => {
+    if (state.favoritesOnly && !state.favoriteProductIds.has(product.id)) return false;
     if (state.category && product.type !== state.category) return false;
     if (state.brand && product.brand !== state.brand) return false;
     if (!queryParts.length) return true;
@@ -690,6 +841,7 @@ function renderProducts() {
 
 function currentFilterLabel() {
   const labels = [];
+  if (state.favoritesOnly) labels.push("Favoritos");
   if (state.category) labels.push(state.category);
   if (state.brand) labels.push(state.brand);
   if (state.query.trim()) labels.push(`Busca: ${state.query.trim()}`);
@@ -702,7 +854,12 @@ function renderProductCard(product) {
   const priceNote = catalogPriceNote(product, featuredPrice);
   const minQty = getInitialQty(product);
   const photoUrl = getProductPhotoUrl(product);
-  const actions = quantityInCart
+  const stock = productStockStatus(product);
+  const isFavorite = state.favoriteProductIds.has(product.id);
+  const isOutOfStock = stock.value === "out";
+  const actions = isOutOfStock
+    ? `<button class="add-button" type="button" disabled>Esgotado</button>`
+    : quantityInCart
     ? `
         <div class="card-cart-actions">
           <div class="qty-control">
@@ -722,12 +879,16 @@ function renderProductCard(product) {
   return `
     <article class="product-card">
       <div class="product-visual${photoUrl ? " has-photo" : " no-photo"}">
+        <button class="favorite-button${isFavorite ? " is-active" : ""}" type="button" data-toggle-favorite="${escapeHtml(product.id)}" aria-label="${isFavorite ? "Remover dos favoritos" : "Adicionar aos favoritos"}">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" /></svg>
+        </button>
         ${
           photoUrl
             ? `<img class="product-photo" src="${escapeHtml(photoUrl)}" alt="${escapeHtml(product.name)}" loading="lazy" onerror="this.closest('.product-visual').classList.add('no-photo'); this.remove();" />`
             : ""
         }
         <span class="type-badge">${escapeHtml(product.type)}</span>
+        ${stock.value !== "available" ? `<span class="stock-badge is-${escapeHtml(stock.value)}">${escapeHtml(stock.customerLabel)}</span>` : ""}
         <span class="part-symbol" aria-hidden="true">${escapeHtml(symbolFor(product.type))}</span>
       </div>
       <div class="product-body">
@@ -756,6 +917,13 @@ function getProductPhotoUrl(product) {
     ? mappedPhoto
     : `./fotos/${mappedPhoto}`;
   return "";
+}
+
+function productStockStatus(product) {
+  const value = STOCK_STATUS_OPTIONS.some((option) => option.value === product.stockStatus)
+    ? product.stockStatus
+    : "available";
+  return STOCK_STATUS_OPTIONS.find((option) => option.value === value) || STOCK_STATUS_OPTIONS[0];
 }
 
 function symbolFor(type) {
@@ -825,6 +993,10 @@ function getInitialQty(product) {
 function addProduct(productId) {
   const product = productsById.get(productId);
   if (!product) return;
+  if (productStockStatus(product).value === "out") {
+    showToast("Produto esgotado no momento");
+    return;
+  }
   const current = state.cart[productId] ?? 0;
   state.cart[productId] = current ? current + 1 : getInitialQty(product);
   state.currentOrderCode = "";
@@ -936,7 +1108,7 @@ function getCartItems() {
   return Object.entries(state.cart)
     .map(([id, qty]) => {
       const product = productsById.get(id);
-      if (!product || !product.active || !qty) return null;
+      if (!product || !product.active || productStockStatus(product).value === "out" || !qty) return null;
       const tier = getPriceTier(product, qty);
       const unitPrice = tier?.price ?? product.price ?? 0;
       return {
@@ -1387,6 +1559,7 @@ async function handleSellerDashboardClick(event) {
   if (button.dataset.adminView) {
     state.adminView = button.dataset.adminView;
     state.adminCatalogVisible = 60;
+    state.adminCustomerPage = 1;
     await renderSellerDashboard(state.activeSellerOrderCode);
     return;
   }
@@ -1415,6 +1588,37 @@ async function handleSellerDashboardClick(event) {
   if (button.dataset.loadAdminProducts) {
     state.adminCatalogVisible += 60;
     updateAdminCatalogList();
+    return;
+  }
+
+  if (button.dataset.adminCustomerPage) {
+    state.adminCustomerPage = Math.max(1, Number(button.dataset.adminCustomerPage) || 1);
+    await renderSellerDashboard();
+    return;
+  }
+
+  if (button.dataset.clearAdminCustomerSearch) {
+    state.adminCustomerQuery = "";
+    state.adminCustomerPage = 1;
+    state.activeAdminCustomerPhone = "";
+    state.adminCustomerOrders = [];
+    await renderSellerDashboard();
+    return;
+  }
+
+  if (button.dataset.viewAdminCustomer) {
+    state.activeAdminCustomerPhone = button.dataset.viewAdminCustomer;
+    await loadAdminCustomerOrders(state.activeAdminCustomerPhone);
+    refs.sellerDetail.innerHTML = renderAdminCustomers();
+    return;
+  }
+
+  if (button.dataset.openCustomerOrders) {
+    state.adminView = "orders";
+    state.sellerOrderQuery = button.dataset.openCustomerOrders;
+    state.sellerOrderStatus = "all";
+    state.sellerOrderPage = 1;
+    await renderSellerDashboard();
     return;
   }
 
@@ -1514,6 +1718,14 @@ async function handleSellerDashboardChange(event) {
     return;
   }
 
+  const stockSelect = event.target.closest("[data-admin-stock-status]");
+  if (stockSelect) {
+    await saveProductOverride(stockSelect.dataset.adminStockStatus, {
+      stockStatus: stockSelect.value,
+    });
+    return;
+  }
+
   const fileInput = event.target.closest("[data-admin-photo-file]");
   if (fileInput?.files?.[0]) {
     try {
@@ -1535,6 +1747,16 @@ async function handleSellerDashboardSubmit(event) {
     const formData = new FormData(form);
     state.sellerOrderQuery = String(formData.get("query") || "").trim();
     state.sellerOrderPage = 1;
+    await renderSellerDashboard();
+    return;
+  }
+
+  if (form.matches("[data-admin-customer-search-form]")) {
+    const formData = new FormData(form);
+    state.adminCustomerQuery = String(formData.get("query") || "").trim();
+    state.adminCustomerPage = 1;
+    state.activeAdminCustomerPhone = "";
+    state.adminCustomerOrders = [];
     await renderSellerDashboard();
     return;
   }
@@ -1592,7 +1814,9 @@ async function renderSellerDashboard(preferredCode = "") {
     state.sellerOrderPage = state.sellerPagination.page;
     const adminCatalogMode = state.auth.user?.role === "admin" && state.adminView === "catalog";
     const adminBackupMode = state.auth.user?.role === "admin" && state.adminView === "backups";
-    const selectedCode = adminCatalogMode || adminBackupMode ? "" : preferredCode || state.activeSellerOrderCode || orders[0]?.code || "";
+    const adminCustomerMode = state.auth.user?.role === "admin" && state.adminView === "customers";
+    const adminSideMode = adminCatalogMode || adminBackupMode || adminCustomerMode;
+    const selectedCode = adminSideMode ? "" : preferredCode || state.activeSellerOrderCode || orders[0]?.code || "";
     selectedOrder = selectedCode ? await fetchSellerOrder(selectedCode) : null;
     state.activeSellerOrderCode = selectedOrder?.code || "";
 
@@ -1603,6 +1827,11 @@ async function renderSellerDashboard(preferredCode = "") {
         const backupsResponse = await apiRequest("/api/backups");
         state.orderBackups = backupsResponse.backups || [];
       }
+      if (adminCustomerMode) {
+        await loadAdminCustomers();
+        if (state.activeAdminCustomerPhone) await loadAdminCustomerOrders(state.activeAdminCustomerPhone);
+        else state.adminCustomerOrders = [];
+      }
     }
   } catch (error) {
     clearAuth();
@@ -1612,6 +1841,8 @@ async function renderSellerDashboard(preferredCode = "") {
 
   const adminCatalogMode = state.auth.user?.role === "admin" && state.adminView === "catalog";
   const adminBackupMode = state.auth.user?.role === "admin" && state.adminView === "backups";
+  const adminCustomerMode = state.auth.user?.role === "admin" && state.adminView === "customers";
+  const adminSideMode = adminCatalogMode || adminBackupMode || adminCustomerMode;
   const sellerList = `
     ${renderAdminPanel()}
     ${renderSellerOrderFilters()}
@@ -1626,7 +1857,7 @@ async function renderSellerDashboard(preferredCode = "") {
           `
     }
   `;
-  refs.sellerOrders.innerHTML = adminBackupMode
+  refs.sellerOrders.innerHTML = adminSideMode
     ? `${renderAdminPanel()}`
     : orders.length
     ? sellerList
@@ -1645,6 +1876,8 @@ async function renderSellerDashboard(preferredCode = "") {
       ? renderAdminCatalog()
     : adminBackupMode
       ? renderAdminBackups()
+    : adminCustomerMode
+      ? renderAdminCustomers()
     : `
         <div class="seller-detail-card seller-empty">
           <strong>Aguardando pedido</strong>
@@ -1728,6 +1961,7 @@ function renderAdminPanel() {
   if (state.auth?.user?.role !== "admin") return "";
   const ordersActive = state.adminView === "orders" ? " is-active" : "";
   const catalogActive = state.adminView === "catalog" ? " is-active" : "";
+  const customersActive = state.adminView === "customers" ? " is-active" : "";
   const backupsActive = state.adminView === "backups" ? " is-active" : "";
   return `
     <section class="seller-admin-panel">
@@ -1738,6 +1972,7 @@ function renderAdminPanel() {
       <div class="seller-admin-tabs">
         <button class="primary-outline${ordersActive}" type="button" data-admin-view="orders">Pedidos</button>
         <button class="primary-outline${catalogActive}" type="button" data-admin-view="catalog">Catalogo</button>
+        <button class="primary-outline${customersActive}" type="button" data-admin-view="customers">Clientes</button>
         <button class="primary-outline${backupsActive}" type="button" data-admin-view="backups">Backups</button>
       </div>
       <form class="seller-user-form" data-create-user-form>
@@ -1781,6 +2016,8 @@ function renderAdminCatalog() {
             <option value="inactive" ${state.adminCatalogStatus === "inactive" ? "selected" : ""}>Inativos</option>
             <option value="with-photo" ${state.adminCatalogStatus === "with-photo" ? "selected" : ""}>Com foto</option>
             <option value="without-photo" ${state.adminCatalogStatus === "without-photo" ? "selected" : ""}>Sem foto</option>
+            <option value="low-stock" ${state.adminCatalogStatus === "low-stock" ? "selected" : ""}>Baixo estoque</option>
+            <option value="out-stock" ${state.adminCatalogStatus === "out-stock" ? "selected" : ""}>Esgotados</option>
           </select>
         </label>
       </div>
@@ -1829,6 +2066,188 @@ function renderAdminBackups() {
         }
       </div>
     </article>
+  `;
+}
+
+function adminCustomerQueryParams() {
+  const params = new URLSearchParams({
+    page: String(state.adminCustomerPage || 1),
+    limit: String(state.adminCustomerPagination.limit || 40),
+  });
+  if (state.adminCustomerQuery.trim()) params.set("q", state.adminCustomerQuery.trim());
+  return params.toString();
+}
+
+async function loadAdminCustomers() {
+  const response = await apiRequest(`/api/customers/summary?${adminCustomerQueryParams()}`);
+  state.adminCustomers = response.customers || [];
+  state.adminCustomerPagination = {
+    page: Number(response.page || state.adminCustomerPage || 1),
+    limit: Number(response.limit || 40),
+    total: Number(response.total || 0),
+    totalPages: Number(response.totalPages || 1),
+  };
+  state.adminCustomerPage = state.adminCustomerPagination.page;
+
+  const activeOnPage = state.activeAdminCustomerPhone
+    && state.adminCustomers.some((customer) => customer.phone === state.activeAdminCustomerPhone);
+  if (!activeOnPage) {
+    state.activeAdminCustomerPhone = state.adminCustomers.find((customer) => customer.phone)?.phone || "";
+  }
+}
+
+async function loadAdminCustomerOrders(phone, page = 1) {
+  if (!phone) {
+    state.adminCustomerOrders = [];
+    return;
+  }
+
+  const response = await apiRequest(`/api/customers/${encodeURIComponent(phone)}/orders?page=${page}&limit=20`);
+  state.adminCustomerOrders = response.orders || [];
+  state.adminCustomerOrdersPagination = {
+    page: Number(response.page || page),
+    limit: Number(response.limit || 20),
+    total: Number(response.total || 0),
+    totalPages: Number(response.totalPages || 1),
+  };
+}
+
+function renderAdminCustomers() {
+  const customers = state.adminCustomers || [];
+  const pagination = state.adminCustomerPagination;
+  const selected = state.activeAdminCustomerPhone
+    ? customers.find((customer) => customer.phone === state.activeAdminCustomerPhone) || null
+    : null;
+  const start = pagination.total ? (pagination.page - 1) * pagination.limit + 1 : 0;
+  const end = Math.min(pagination.total, pagination.page * pagination.limit);
+
+  return `
+    <article class="seller-detail-card admin-customer-panel">
+      <div class="seller-detail-top">
+        <div>
+          <span>Clientes</span>
+          <h3>Ficha do Cliente</h3>
+          <small>${pagination.total} cliente${pagination.total === 1 ? "" : "s"} com pedidos realizados</small>
+        </div>
+        <strong>${pagination.total}</strong>
+      </div>
+
+      <form class="seller-search-form admin-customer-search" data-admin-customer-search-form>
+        <input name="query" type="search" value="${escapeHtml(state.adminCustomerQuery)}" placeholder="Buscar nome ou WhatsApp" />
+        <button class="primary-button" type="submit">Buscar</button>
+      </form>
+
+      <div class="admin-customer-summary">
+        <span>${start}-${end} de ${pagination.total} clientes</span>
+        ${state.adminCustomerQuery ? `<button class="text-button" type="button" data-clear-admin-customer-search="true">Limpar busca</button>` : ""}
+      </div>
+
+      <div class="admin-customer-layout">
+        <div class="admin-customer-list">
+          ${
+            customers.length
+              ? customers.map(renderAdminCustomerCard).join("")
+              : `
+                  <div class="seller-empty">
+                    <strong>Nenhum cliente encontrado</strong>
+                    <span>Tente buscar por outro nome ou telefone.</span>
+                  </div>
+                `
+          }
+          ${renderAdminCustomerPagination()}
+        </div>
+        ${renderAdminCustomerDetail(selected)}
+      </div>
+    </article>
+  `;
+}
+
+function renderAdminCustomerCard(customer) {
+  const active = customer.phone && customer.phone === state.activeAdminCustomerPhone ? " is-active" : "";
+  return `
+    <button class="admin-customer-card${active}" type="button" data-view-admin-customer="${escapeHtml(customer.phone || "")}" ${customer.phone ? "" : "disabled"}>
+      <span>
+        <strong>${escapeHtml(customer.name || "Cliente")}</strong>
+        <small>${escapeHtml(formatPhone(customer.phone) || "Sem telefone")}</small>
+      </span>
+      <span>
+        <strong>${money.format(Number(customer.totalValue || 0))}</strong>
+        <small>${Number(customer.orderCount || 0)} pedido${Number(customer.orderCount || 0) === 1 ? "" : "s"}</small>
+      </span>
+    </button>
+  `;
+}
+
+function renderAdminCustomerDetail(customer) {
+  if (!customer) {
+    return `
+      <div class="admin-customer-detail seller-empty">
+        <strong>Selecione um cliente</strong>
+        <span>A ficha mostra resumo, valores e os ultimos pedidos desse WhatsApp.</span>
+      </div>
+    `;
+  }
+
+  const orders = state.adminCustomerOrders || [];
+  return `
+    <div class="admin-customer-detail">
+      <div class="admin-customer-head">
+        <div>
+          <strong>${escapeHtml(customer.name || "Cliente")}</strong>
+          <span>${escapeHtml(formatPhone(customer.phone) || "Sem telefone")}</span>
+        </div>
+        <button class="primary-outline" type="button" data-open-customer-orders="${escapeHtml(customer.phone || "")}">Ver no painel de pedidos</button>
+      </div>
+
+      <div class="admin-customer-stats">
+        <span><strong>${Number(customer.orderCount || 0)}</strong> pedidos</span>
+        <span><strong>${Number(customer.itemCount || 0)}</strong> pecas</span>
+        <span><strong>${money.format(Number(customer.totalValue || 0))}</strong> total</span>
+        <span><strong>${Number(customer.openCount || 0)}</strong> em aberto</span>
+        <span><strong>${Number(customer.paidCount || 0)}</strong> pagos</span>
+        <span><strong>${Number(customer.cancelledCount || 0)}</strong> cancelados</span>
+      </div>
+
+      <div class="admin-customer-orders">
+        <div>
+          <strong>Ultimos pedidos</strong>
+          <small>Ultimo: ${escapeHtml(customer.lastOrderCode || "-")} - ${escapeHtml(formatOrderDate(customer.lastOrderAt))}</small>
+        </div>
+        ${
+          orders.length
+            ? orders.map(renderAdminCustomerOrder).join("")
+            : `<span class="customer-empty">Nenhum pedido carregado para essa ficha.</span>`
+        }
+      </div>
+    </div>
+  `;
+}
+
+function renderAdminCustomerOrder(order) {
+  return `
+    <div class="admin-customer-order">
+      <span>
+        <strong>${escapeHtml(order.code)}</strong>
+        <small>${escapeHtml(orderStatusLabel(order.status))} - ${escapeHtml(formatOrderDate(order.createdAt))}</small>
+      </span>
+      <span>
+        <strong>${money.format(Number(order.total || 0))}</strong>
+        <small>${Number(order.itemCount || 0)} pecas</small>
+      </span>
+      <button class="primary-outline" type="button" data-view-seller-order="${escapeHtml(order.code)}">Abrir</button>
+    </div>
+  `;
+}
+
+function renderAdminCustomerPagination() {
+  const pagination = state.adminCustomerPagination;
+  if (pagination.totalPages <= 1) return "";
+  return `
+    <nav class="seller-pagination admin-customer-pagination" aria-label="Paginas de clientes">
+      <button class="primary-outline" type="button" data-admin-customer-page="${pagination.page - 1}" ${pagination.page <= 1 ? "disabled" : ""}>Anterior</button>
+      <span>Pagina ${pagination.page} de ${pagination.totalPages}</span>
+      <button class="primary-outline" type="button" data-admin-customer-page="${pagination.page + 1}" ${pagination.page >= pagination.totalPages ? "disabled" : ""}>Proxima</button>
+    </nav>
   `;
 }
 
@@ -1889,6 +2308,8 @@ function getAdminProducts() {
     if (state.adminCatalogStatus === "inactive" && product.active) return false;
     if (state.adminCatalogStatus === "with-photo" && !hasPhoto) return false;
     if (state.adminCatalogStatus === "without-photo" && hasPhoto) return false;
+    if (state.adminCatalogStatus === "low-stock" && productStockStatus(product).value !== "low") return false;
+    if (state.adminCatalogStatus === "out-stock" && productStockStatus(product).value !== "out") return false;
     if (!queryParts.length) return true;
 
     const haystack = normalize(`${product.id} ${product.name} ${product.brand} ${product.type} ${product.section}`);
@@ -1899,6 +2320,7 @@ function getAdminProducts() {
 function renderAdminProductCard(product) {
   const photoUrl = getProductPhotoUrl(product);
   const nextActive = !product.active;
+  const stock = productStockStatus(product);
   return `
     <article class="admin-product-card" data-admin-product-card="${escapeHtml(product.id)}">
       <div class="admin-product-preview${photoUrl ? " has-photo" : ""}">
@@ -1916,11 +2338,20 @@ function renderAdminProductCard(product) {
         <span class="admin-status ${product.active ? "is-active" : "is-inactive"}">
           ${product.active ? "Ativo no catalogo" : "Inativo"}
         </span>
+        <span class="admin-stock is-${escapeHtml(stock.value)}">${escapeHtml(stock.label)}</span>
       </div>
       <div class="admin-product-actions">
         <button class="${product.active ? "primary-outline" : "primary-button"}" type="button" data-admin-toggle-product="${escapeHtml(product.id)}" data-active="${String(nextActive)}">
           ${product.active ? "Desativar" : "Ativar"}
         </button>
+        <label class="admin-stock-control">
+          Estoque
+          <select data-admin-stock-status="${escapeHtml(product.id)}">
+            ${STOCK_STATUS_OPTIONS.map((option) => `
+              <option value="${option.value}" ${option.value === stock.value ? "selected" : ""}>${option.label}</option>
+            `).join("")}
+          </select>
+        </label>
         <label class="admin-file-button">
           Enviar foto
           <input type="file" accept="image/*" data-admin-photo-file="${escapeHtml(product.id)}" />
